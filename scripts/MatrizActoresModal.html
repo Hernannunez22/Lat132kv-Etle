@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+      ::-webkit-scrollbar { width: 6px; height: 6px; }
+      ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+      @media print {
+        body { background-color: #ffffff; padding: 0; }
+        .no-print { display: none !important; }
+        #contenedorTabla { border: none !important; box-shadow: none !important; }
+        .max-h-\[500px\] { max-height: none !important; overflow: visible !important; }
+        table { font-size: 10px !important; }
+        th, td { padding: 4px 6px !important; }
+      }
+    </style>
+  </head>
+  <body class="p-4 md:p-6 text-slate-800 antialiased">
+    <div class="max-w-7xl mx-auto space-y-4">
+
+      <!-- Header Principal -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <span class="p-2.5 bg-indigo-100 text-indigo-800 rounded-xl text-xl font-bold">📡</span>
+          <div>
+            <h1 class="text-lg font-bold text-slate-900 leading-tight">Auditor de Envíos y Devoluciones por Actor (TRANSNOA / Contratistas)</h1>
+            <p class="text-xs text-slate-500">Auditoría cruzada en <b>05 - Libros</b>: Notas de Pedido (NP), Órdenes de Servicio (OS) y Reingresos</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2 flex-wrap no-print">
+          <select id="selFiltroActor" onchange="cargarMatriz()" class="text-xs font-semibold px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-600">
+            <option value="TRANSNOA">Actor: TRANSNOA (Transportista)</option>
+            <option value="CONTRATISTA">Actor: Contratistas / UTE</option>
+            <option value="COMITENTE">Actor: Comitente / Inspección</option>
+          </select>
+          <select id="selFiltroObra" onchange="cargarMatriz()" class="text-xs font-semibold px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-600">
+            <option value="TODOS">Todas las Obras</option>
+            <option value="ET Villa Quinteros">ET Villa Quinteros</option>
+            <option value="ET Leales">ET Leales</option>
+            <option value="ET El Bracho">ET El Bracho</option>
+            <option value="LAT El Bracho - Villa Quinteros">LAT El Bracho - Villa Quinteros</option>
+          </select>
+          
+          <!-- Botones de Acción y Descarga de Informes -->
+          <button onclick="descargarInformeCSV()" class="px-3 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold rounded-lg shadow-sm transition-all flex items-center gap-1.5" title="Exportar datos a Excel / CSV">
+            <span>📥 Descargar Excel/CSV</span>
+          </button>
+          <button onclick="guardarInformeEnSheet()" id="btnGuardarSheet" class="px-3 py-2 bg-sky-700 hover:bg-sky-800 text-white text-xs font-semibold rounded-lg shadow-sm transition-all flex items-center gap-1.5" title="Crear nueva pestaña con el informe">
+            <span>📊 Guardar en Pestaña</span>
+          </button>
+          <button onclick="window.print()" class="px-3 py-2 bg-slate-700 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg shadow-sm transition-all flex items-center gap-1.5" title="Imprimir o guardar como PDF">
+            <span>🖨️ PDF</span>
+          </button>
+          <button onclick="escanearLibrosYActor()" class="px-3 py-2 bg-indigo-700 hover:bg-indigo-800 text-white text-xs font-semibold rounded-lg shadow-sm transition-all flex items-center gap-1.5">
+            <span>⚡ Auditar Libros</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Banner Informativo / Notificación -->
+      <div id="bannerNotificacion" class="hidden no-print rounded-xl p-3 text-xs font-semibold flex items-center justify-between">
+        <span id="txtNotificacion"></span>
+        <button onclick="ocultarBanner()" class="font-bold ml-2">✕</button>
+      </div>
+
+      <!-- Tarjetas KPI -->
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div class="bg-white border border-slate-200 rounded-xl p-3 shadow-sm text-center">
+          <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Total en Registro</div>
+          <div id="kpiTotalDocs" class="text-xl font-bold text-slate-800 mt-0.5">-</div>
+        </div>
+        <div class="bg-white border border-emerald-200 bg-emerald-50/30 rounded-xl p-3 shadow-sm text-center cursor-pointer hover:bg-emerald-50" onclick="filtrarPorEstado('ENVIADO')">
+          <div class="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Enviados a TRANSNOA (NP)</div>
+          <div id="kpiEnviados" class="text-xl font-bold text-emerald-700 mt-0.5">-</div>
+        </div>
+        <div class="bg-white border border-amber-200 bg-amber-50/30 rounded-xl p-3 shadow-sm text-center cursor-pointer hover:bg-amber-50" onclick="filtrarPorEstado('NO_ENVIADO')">
+          <div class="text-[10px] font-bold uppercase tracking-wider text-amber-700">No Enviados (Retenidos)</div>
+          <div id="kpiNoEnviados" class="text-xl font-bold text-amber-700 mt-0.5">-</div>
+        </div>
+        <div class="bg-white border border-purple-200 bg-purple-50/30 rounded-xl p-3 shadow-sm text-center cursor-pointer hover:bg-purple-50" onclick="filtrarPorEstado('DEVUELTO')">
+          <div class="text-[10px] font-bold uppercase tracking-wider text-purple-700">Devueltos por TRANSNOA (OS)</div>
+          <div id="kpiDevueltos" class="text-xl font-bold text-purple-700 mt-0.5">-</div>
+        </div>
+        <div class="bg-white border border-blue-200 bg-blue-50/30 rounded-xl p-3 shadow-sm text-center cursor-pointer hover:bg-blue-50" onclick="filtrarPorEstado('REINGRESADO')">
+          <div class="text-[10px] font-bold uppercase tracking-wider text-blue-700">Reingresados p/ Contratista</div>
+          <div id="kpiReingresados" class="text-xl font-bold text-blue-700 mt-0.5">-</div>
+        </div>
+      </div>
+
+      <!-- Barra de Filtros y Búsqueda -->
+      <div class="flex flex-col md:flex-row items-center gap-2 border-b border-slate-200 pb-3">
+        <div class="flex items-center gap-1.5 overflow-x-auto w-full md:w-auto">
+          <button id="btnFiltroTodos" onclick="setFiltroPestana('TODOS')" class="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-indigo-700 text-white shadow-sm whitespace-nowrap">
+            Todos (<span id="cntTodos">0</span>)
+          </button>
+          <button id="btnFiltroEnviados" onclick="setFiltroPestana('ENVIADO')" class="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 whitespace-nowrap">
+            📤 Enviados a TRANSNOA (<span id="cntEnviados">0</span>)
+          </button>
+          <button id="btnFiltroNoEnviados" onclick="setFiltroPestana('NO_ENVIADO')" class="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-slate-100 hover:bg-slate-200 text-amber-700 whitespace-nowrap">
+            ⚠️ No Enviados (<span id="cntNoEnviados">0</span>)
+          </button>
+          <button id="btnFiltroDevueltos" onclick="setFiltroPestana('DEVUELTO')" class="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-slate-100 hover:bg-slate-200 text-purple-700 whitespace-nowrap">
+            📥 Con Devolución (OS) (<span id="cntDevueltos">0</span>)
+          </button>
+          <button id="btnFiltroReingresados" onclick="setFiltroPestana('REINGRESADO')" class="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-slate-100 hover:bg-slate-200 text-blue-700 whitespace-nowrap">
+            🔄 Reingresados (Ciclo 2+) (<span id="cntReingresados">0</span>)
+          </button>
+        </div>
+
+        <div class="ml-auto w-full md:w-72">
+          <input 
+            type="text" 
+            id="txtBuscador" 
+            placeholder="Buscar por plano, nota NP, orden OS..." 
+            oninput="renderizarMatriz()"
+            class="w-full px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-600"
+          />
+        </div>
+      </div>
+
+      <!-- Spinner de Carga -->
+      <div id="loaderMatriz" class="bg-white border border-slate-200 rounded-xl p-10 text-center shadow-sm">
+        <div class="inline-block animate-spin w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full mb-3"></div>
+        <p class="text-sm font-semibold text-slate-700">Analizando registros de comunicaciones, Notas de Pedido y Órdenes de Servicio...</p>
+        <p class="text-xs text-slate-400 mt-1">Filtrando pedidos de prioridad y cruzando carpeta Libros y Hojas Master...</p>
+      </div>
+
+      <!-- Tabla Principal de Matriz de Trazabilidad -->
+      <div id="contenedorTabla" class="hidden bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+        <div class="max-h-[500px] overflow-y-auto">
+          <table class="w-full text-left text-xs border-collapse">
+            <thead class="bg-indigo-900 text-white uppercase text-[10px] sticky top-0 z-10 font-bold tracking-wider">
+              <tr>
+                <th class="p-3">Obra / Proyecto</th>
+                <th class="p-3">Código del Plano</th>
+                <th class="p-3">Descripción</th>
+                <th class="p-3 text-center">Rev Actual</th>
+                <th class="p-3">Envío a TRANSNOA (Nota Pedido NP)</th>
+                <th class="p-3">Devolución TRANSNOA (Orden Servicio OS)</th>
+                <th class="p-3 text-center">Estado de Devolución</th>
+                <th class="p-3">Reingreso Contratista</th>
+                <th class="p-3 text-center no-print">Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="tbodyMatriz" class="divide-y divide-slate-100">
+              <!-- Filas dinámicas -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+    <script>
+      let matrizDatos = [];
+      let pestanaActiva = 'TODOS';
+
+      window.onload = function() {
+        cargarMatriz();
+      };
+
+      function mostrarBanner(msg, esError = false) {
+        const b = document.getElementById('bannerNotificacion');
+        b.className = esError 
+          ? 'bg-rose-50 border border-rose-200 text-rose-800 rounded-xl p-3 text-xs font-semibold flex items-center justify-between'
+          : 'bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl p-3 text-xs font-semibold flex items-center justify-between';
+        document.getElementById('txtNotificacion').innerText = msg;
+        b.classList.remove('hidden');
+      }
+
+      function ocultarBanner() {
+        document.getElementById('bannerNotificacion').classList.add('hidden');
+      }
+
+      function cargarMatriz() {
+        document.getElementById('loaderMatriz').classList.remove('hidden');
+        document.getElementById('contenedorTabla').classList.add('hidden');
+        ocultarBanner();
+
+        const actor = document.getElementById('selFiltroActor').value;
+        const obra = document.getElementById('selFiltroObra').value;
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            document.getElementById('loaderMatriz').classList.add('hidden');
+            document.getElementById('contenedorTabla').classList.remove('hidden');
+
+            matrizDatos = (res.items || []).filter(item => {
+              const c = (item.codigo || '').toUpperCase().trim();
+              const d = (item.descripcion || '').toUpperCase().trim();
+
+              // Filtro en cliente: descartar interruptores T4748, notas TU1, OP, temporales, seguros y notas
+              if (
+                c.startsWith('._') ||
+                c.startsWith('~$') ||
+                c.startsWith('T4748') ||
+                d.includes('HVCB-145') ||
+                d.includes('INTERRUPTOR DE AT') ||
+                c.startsWith('TU1') ||
+                c.startsWith('COMCT') ||
+                /^OP[\s\-_0-9]/i.test(c) ||
+                /\bOP\s*\d{3,5}\b/i.test(c) ||
+                c.startsWith('NP-') ||
+                c.startsWith('OS-') ||
+                c.includes('SEGURO') ||
+                d.includes('SEGURO') ||
+                c.includes('POLIZA') ||
+                c.includes('RESUMEN LIBRO') ||
+                c.includes('PROGRAMA0') ||
+                c.includes('MODELO') ||
+                d.includes('ZONIFICACIÓN') ||
+                d.includes('ESTUDIOS ELÉCTRICOS')
+              ) {
+                return false;
+              }
+
+              // Validar que el código cumpla con el estándar de plano de ingeniería
+              const regexIngenieria = /^(?:ET[-_](?:LE|VQ|BR|EB)|L[-_]EB[-_]VQ)[-_](?:OE|OC|OEM|TCYP)[-_](?:PL|MD|PN|DG|ET|IS|MC)/i;
+              if (!regexIngenieria.test(c)) {
+                return false;
+              }
+
+              return true;
+            }).map(item => {
+              // Limpieza defensiva en cliente: Si el dictamen es un "Pedido de Prioridad", se neutraliza
+              if (item.dictamenDevolucion && item.dictamenDevolucion.toUpperCase().includes('PRIORIDAD')) {
+                item.devueltoPorTransnoa = false;
+                item.devolucionOrden = '';
+                item.urlDevolucionOrden = '';
+                item.fechaDevolucion = '';
+                item.dictamenDevolucion = '';
+              }
+              return item;
+            });
+
+            // Recalcular KPIs limpios sin pedidos de prioridad ni OPs
+            const total = matrizDatos.length;
+            const enviados = matrizDatos.filter(x => x.enviadoATransnoa).length;
+            const noEnviados = Math.max(0, total - enviados);
+            const devueltos = matrizDatos.filter(x => x.devueltoPorTransnoa).length;
+            const reingresados = matrizDatos.filter(x => x.reingresadoPorContratista).length;
+
+            document.getElementById('kpiTotalDocs').innerText = total;
+            document.getElementById('kpiEnviados').innerText = enviados;
+            document.getElementById('kpiNoEnviados').innerText = noEnviados;
+            document.getElementById('kpiDevueltos').innerText = devueltos;
+            document.getElementById('kpiReingresados').innerText = reingresados;
+
+            document.getElementById('cntTodos').innerText = total;
+            document.getElementById('cntEnviados').innerText = enviados;
+            document.getElementById('cntNoEnviados').innerText = noEnviados;
+            document.getElementById('cntDevueltos').innerText = devueltos;
+            document.getElementById('cntReingresados').innerText = reingresados;
+
+            renderizarMatriz();
+          })
+          .withFailureHandler(function(err) {
+            document.getElementById('loaderMatriz').innerHTML = `<p class="text-rose-600 font-bold text-xs">Error cargando matriz: ${err.message}</p>`;
+          })
+          .obtenerMatrizComunicacionesActores(actor, obra);
+      }
+
+      function escanearLibrosYActor() {
+        document.getElementById('loaderMatriz').classList.remove('hidden');
+        document.getElementById('contenedorTabla').classList.add('hidden');
+        document.getElementById('loaderMatriz').querySelector('p').innerText = 'Escaneando exhaustivamente carpetas 05 - Libros y UTE - TRANSNOA en Drive...';
+
+        google.script.run
+          .withSuccessHandler(function() {
+            cargarMatriz();
+          })
+          .escanearCarpetaLibrosComunicaciones();
+      }
+
+      function setFiltroPestana(tab) {
+        pestanaActiva = tab;
+        const botones = {
+          'TODOS': document.getElementById('btnFiltroTodos'),
+          'ENVIADO': document.getElementById('btnFiltroEnviados'),
+          'NO_ENVIADO': document.getElementById('btnFiltroNoEnviados'),
+          'DEVUELTO': document.getElementById('btnFiltroDevueltos'),
+          'REINGRESADO': document.getElementById('btnFiltroReingresados')
+        };
+
+        Object.keys(botones).forEach(k => {
+          if (k === tab) {
+            botones[k].className = 'px-3.5 py-1.5 text-xs font-bold rounded-lg bg-indigo-700 text-white shadow-sm whitespace-nowrap';
+          } else {
+            botones[k].className = 'px-3.5 py-1.5 text-xs font-bold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 whitespace-nowrap';
+          }
+        });
+
+        renderizarMatriz();
+      }
+
+      function filtrarPorEstado(tab) {
+        setFiltroPestana(tab);
+      }
+
+      function obtenerFiltrados() {
+        const q = (document.getElementById('txtBuscador').value || '').toLowerCase().trim();
+        return matrizDatos.filter(item => {
+          const matchTexto = !q || 
+            item.codigo.toLowerCase().includes(q) || 
+            item.descripcion.toLowerCase().includes(q) || 
+            item.proyecto.toLowerCase().includes(q) ||
+            (item.envioNota && item.envioNota.toLowerCase().includes(q)) ||
+            (item.devolucionOrden && item.devolucionOrden.toLowerCase().includes(q));
+
+          if (!matchTexto) return false;
+
+          if (pestanaActiva === 'ENVIADO') return item.enviadoATransnoa === true;
+          if (pestanaActiva === 'NO_ENVIADO') return item.enviadoATransnoa === false;
+          if (pestanaActiva === 'DEVUELTO') return item.devueltoPorTransnoa === true;
+          if (pestanaActiva === 'REINGRESADO') return item.reingresadoPorContratista === true;
+
+          return true;
+        });
+      }
+
+      function renderizarMatriz() {
+        const tbody = document.getElementById('tbodyMatriz');
+        tbody.innerHTML = '';
+
+        const filtrados = obtenerFiltrados();
+
+        if (filtrados.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="9" class="p-8 text-center text-slate-400">No se encontraron documentos para los filtros seleccionados.</td></tr>`;
+          return;
+        }
+
+        filtrados.forEach(row => {
+          // 1. Envío a TRANSNOA (NP)
+          let envioHtml = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">⚠️ No enviado a TR</span>`;
+          if (row.enviadoATransnoa) {
+            const linkNP = row.urlEnvioNota ? `<a href="${row.urlEnvioNota}" target="_blank" class="text-indigo-600 hover:underline font-bold">🔗 ${row.envioNota}</a>` : `<b class="text-slate-800">${row.envioNota}</b>`;
+            envioHtml = `
+              <div>
+                <div class="flex items-center gap-1">${linkNP}</div>
+                <div class="text-[10px] text-slate-500 font-medium">📅 ${row.fechaEnvio || '-'}</div>
+              </div>
+            `;
+          }
+
+          // 2. Devolución TRANSNOA (OS)
+          let devHtml = `<span class="text-slate-400 italic text-[11px]">Sin orden de servicio</span>`;
+          if (row.devueltoPorTransnoa) {
+            const linkOS = row.urlDevolucionOrden ? `<a href="${row.urlDevolucionOrden}" target="_blank" class="text-purple-600 hover:underline font-bold">🔗 ${row.devolucionOrden}</a>` : `<b class="text-slate-800">${row.devolucionOrden}</b>`;
+            devHtml = `
+              <div>
+                <div class="flex items-center gap-1">${linkOS}</div>
+                <div class="text-[10px] text-slate-500 font-medium">📅 ${row.fechaDevolucion || '-'}</div>
+              </div>
+            `;
+          }
+
+          // 3. Dictamen de Devolución Badge (Sin Prioridad)
+          let dictamenBadge = `<span class="text-slate-400">-</span>`;
+          if (row.devueltoPorTransnoa) {
+            const dictUpper = (row.dictamenDevolucion || '').toUpperCase();
+            if (dictUpper.includes('APROB') || dictUpper.includes('APTO') || dictUpper.includes('APC')) {
+              dictamenBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">✅ Aprobado / Sin Obs</span>`;
+            } else if (dictUpper.includes('OBSERV') || dictUpper.includes('CONDICION')) {
+              dictamenBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">⚠️ Con Observaciones</span>`;
+            } else {
+              dictamenBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">${row.dictamenDevolucion}</span>`;
+            }
+          }
+
+          // 4. Reingreso Contratista
+          let reingresoHtml = `<span class="text-slate-400 italic text-[11px]">En revisión (Ciclo 1)</span>`;
+          if (row.reingresadoPorContratista) {
+            reingresoHtml = `
+              <div>
+                <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200">
+                  🔄 Rev ${row.revisionReingreso || row.revision}
+                </span>
+                <div class="text-[10px] text-slate-500 mt-0.5 font-medium">${row.remitoReingreso || 'Reingreso'}</div>
+              </div>
+            `;
+          }
+
+          const tr = `
+            <tr class="hover:bg-slate-50 transition-colors">
+              <td class="p-3 font-semibold text-slate-800">${row.proyecto}</td>
+              <td class="p-3 font-mono font-bold text-indigo-900">${row.codigo}</td>
+              <td class="p-3 text-slate-600 max-w-xs truncate" title="${row.descripcion}">${row.descripcion}</td>
+              <td class="p-3 text-center font-bold text-slate-700">${row.revision}</td>
+              <td class="p-3">${envioHtml}</td>
+              <td class="p-3">${devHtml}</td>
+              <td class="p-3 text-center">${dictamenBadge}</td>
+              <td class="p-3">${reingresoHtml}</td>
+              <td class="p-3 text-center no-print">
+                <button onclick="verTrazabilidad('${row.codigo}')" class="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-[10px] font-bold border border-slate-300">
+                  🔍 Línea de Tiempo
+                </button>
+              </td>
+            </tr>
+          `;
+          tbody.insertAdjacentHTML('beforeend', tr);
+        });
+      }
+
+      function verTrazabilidad(codigo) {
+        google.script.run.abrirModalTrazabilidad();
+      }
+
+      // Descarga directa en archivo CSV compatible con Excel
+      function descargarInformeCSV() {
+        const items = obtenerFiltrados();
+        if (items.length === 0) {
+          mostrarBanner("No hay datos para exportar con los filtros actuales.", true);
+          return;
+        }
+
+        const headers = [
+          "OBRA/PROYECTO",
+          "CODIGO PLANO",
+          "DESCRIPCION",
+          "REV ACTUAL",
+          "ENVIO A TRANSNOA (NP)",
+          "FECHA ENVIO",
+          "DEVOLUCION TRANSNOA (OS)",
+          "FECHA DEVOLUCION",
+          "ESTADO DEVOLUCION",
+          "REINGRESO CONTRATISTA"
+        ];
+
+        let csvContent = "\uFEFF" + headers.join(";") + "\n";
+
+        items.forEach(it => {
+          const fila = [
+            `"${(it.proyecto || '').replace(/"/g, '""')}"`,
+            `"${(it.codigo || '').replace(/"/g, '""')}"`,
+            `"${(it.descripcion || '').replace(/"/g, '""')}"`,
+            `"${(it.revision || '').replace(/"/g, '""')}"`,
+            `"${(it.enviadoATransnoa ? it.envioNota : 'No enviado').replace(/"/g, '""')}"`,
+            `"${(it.fechaEnvio || '-').replace(/"/g, '""')}"`,
+            `"${(it.devueltoPorTransnoa ? it.devolucionOrden : 'Sin devolucion').replace(/"/g, '""')}"`,
+            `"${(it.fechaDevolucion || '-').replace(/"/g, '""')}"`,
+            `"${(it.dictamenDevolucion || '-').replace(/"/g, '""')}"`,
+            `"${(it.reingresadoPorContratista ? ('Rev ' + (it.revisionReingreso || it.revision)) : '-').replace(/"/g, '""')}"`
+          ];
+          csvContent += fila.join(";") + "\n";
+        });
+
+        const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        const actor = document.getElementById("selFiltroActor").value;
+        const obra = document.getElementById("selFiltroObra").value.replace(/[^a-zA-Z0-9]/g, "_");
+        const fechaHoy = new Date().toISOString().split("T")[0];
+        
+        a.href = url;
+        a.download = `Informe_${actor}_${obra}_${fechaHoy}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        mostrarBanner("Informe exportado exitosamente a archivo CSV.");
+      }
+
+      // Guardar el informe en una nueva pestaña del Google Sheet
+      function guardarInformeEnSheet() {
+        const items = obtenerFiltrados();
+        if (items.length === 0) {
+          mostrarBanner("No hay filas para guardar con los filtros actuales.", true);
+          return;
+        }
+
+        const btn = document.getElementById("btnGuardarSheet");
+        const txtOrig = btn.innerHTML;
+        btn.innerHTML = "<span>⏳ Guardando...</span>";
+        btn.disabled = true;
+
+        const actor = document.getElementById("selFiltroActor").value;
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            btn.innerHTML = txtOrig;
+            btn.disabled = false;
+            if (res.exito) {
+              mostrarBanner("Pestaña creada con éxito en la planilla: " + res.nombreHoja);
+            } else {
+              mostrarBanner("Error: " + res.error, true);
+            }
+          })
+          .withFailureHandler(function(err) {
+            btn.innerHTML = txtOrig;
+            btn.disabled = false;
+            mostrarBanner("Error al guardar: " + (err.message || String(err)), true);
+          })
+          .exportarMatrizActoresASheet({
+            actor: actor,
+            items: items
+          });
+      }
+    </script>
+  </body>
+</html>

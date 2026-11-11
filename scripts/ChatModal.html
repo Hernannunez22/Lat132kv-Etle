@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      body { font-family: 'Inter', sans-serif; background-color: #f8fafc; height: 100vh; margin: 0; display: flex; flex-direction: column; }
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+      .chat-burbuja { padding: 14px 18px; border-radius: 16px; max-width: 90%; line-height: 1.6; font-size: 13.5px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+      .burbuja-ia { background-color: #ffffff; color: #1e293b; border-bottom-left-radius: 4px; border: 1px solid #e2e8f0; }
+      .burbuja-user { background-color: #2563eb; color: white; border-bottom-right-radius: 4px; align-self: flex-end; }
+      .chat-container { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+      .quick-chip { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; background: #f1f5f9; hover:bg-slate-200; border: 1px solid #cbd5e1; border-radius: 9999px; font-size: 11px; font-weight: 600; color: #334155; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+      .quick-chip:hover { background: #e2e8f0; color: #0f172a; border-color: #94a3b8; }
+    </style>
+  </head>
+  <body>
+    
+    <!-- Encabezado Fijo -->
+    <div class="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shrink-0 shadow-sm z-10">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 bg-blue-600 text-white rounded-xl flex items-center justify-center text-xl font-bold shadow-md shadow-blue-500/20">⚡</div>
+        <div>
+          <h1 class="text-base font-bold text-slate-900 leading-tight flex items-center gap-2">
+            IA de Ingeniería y Control Documental (132 kV)
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200">Multimodal Activo</span>
+          </h1>
+          <p class="text-xs text-slate-500 font-medium">Auditoría cruzada de planos, comparación visual de revisiones, trazabilidad y búsqueda en Drive</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="limpiarConversacion()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-semibold rounded-lg transition-colors border border-slate-300">
+          🧹 Limpiar Chat
+        </button>
+        <button onclick="google.script.host.close()" class="px-3.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold rounded-lg transition-colors">
+          ✕ Cerrar
+        </button>
+      </div>
+    </div>
+
+    <!-- Barra de Preguntas Rápidas y Comparador -->
+    <div class="bg-slate-50 border-b border-slate-200 px-6 py-2.5 flex items-center gap-2 overflow-x-auto shrink-0">
+      <span class="text-[11px] font-bold text-slate-500 uppercase tracking-wider shrink-0">💡 Acciones rápidas:</span>
+      <button class="quick-chip" onclick="lanzarPrompt('¿Qué diferencia técnica hay entre el plano L-EB-VQ-OC-PL-500 y el plano L-EB-VQ-OC-PL-001?')">
+        🔍 Comparar 2 Planos
+      </button>
+      <button class="quick-chip" onclick="lanzarPrompt('¿Hay alguna comunicación de Transnoa a nosotros (UTE) sobre el acceso a VQ?')">
+        📡 Órdenes de Servicio TRANSNOA
+      </button>
+      <button class="quick-chip" onclick="lanzarPrompt('¿Qué planos tienen el Semáforo SLA vencido (>15 días) y en poder de qué actor se encuentran?')">
+        ⏱️ Planos con SLA Vencido
+      </button>
+      <button class="quick-chip" onclick="lanzarPrompt('¿Cuál es el estado de las empresas en la carpeta de interferencias y qué falta para presentar?')">
+        🚧 Resumen Interferencias
+      </button>
+      <button class="quick-chip" onclick="lanzarPrompt('Muéstrame los últimos planos aprobados con Sello APC')">
+        ✅ Ver Sellos APC
+      </button>
+    </div>
+
+    <!-- Área de Mensajes -->
+    <div id="chatMensajes" class="chat-container">
+      <div style="display: flex; flex-direction: column; align-items: flex-start;">
+        <div class="chat-burbuja burbuja-ia">
+          <b>¡Hola! 👋 Soy tu IA Técnica Integrada.</b><br><br>
+          No solo busco datos de la planilla, también <b>puedo abrir los PDFs de Drive y comparar planos e imágenes directamente</b>.<br><br>
+          <b>¿Qué puedes pedirme?</b>
+          <ul class="list-disc pl-5 mt-2 space-y-1 text-slate-700">
+            <li><b>Comparación técnica de planos:</b> <i>"¿Qué diferencia hay entre el plano L-EB-VQ-OC-PL-500_A y L-EB-VQ-OC-PL-500_B?"</i> (Descargaré ambos archivos y te detallaré los cambios técnicos).</li>
+            <li><b>Comunicaciones oficiales:</b> <i>"¿En qué Orden de Servicio nos respondió TRANSNOA sobre los transformadores?"</i></li>
+            <li><b>Trazabilidad y ubicaciones:</b> <i>"¿En qué carpeta física de Drive está el estudio de suelos MD-501?"</i></li>
+            <li><b>Consultas abiertas de ingeniería:</b> Pregúntame libremente sobre cualquier disciplina o documento.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Input Box -->
+    <div class="bg-white border-t border-slate-200 p-4 shrink-0 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+      <div class="max-w-5xl mx-auto relative flex items-end gap-3">
+        <textarea 
+          id="chatInput" 
+          rows="2"
+          placeholder="Escribe tu consulta o pide comparar planos (ej: '¿Qué diferencias hay entre el plano PL-500 y PL-501?')..." 
+          class="w-full px-4 py-3 bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600 focus:bg-white resize-none transition-all text-sm shadow-inner"
+          onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); enviarMensajeChat(); }"
+        ></textarea>
+        <button onclick="enviarMensajeChat()" class="h-12 px-6 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-md transition-all flex items-center gap-2 whitespace-nowrap">
+          <span>Enviar</span>
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
+        </button>
+      </div>
+      <div class="text-center mt-2 text-[11px] text-slate-400 font-medium">
+        Presiona Enter para enviar. Shift + Enter para salto de línea.
+      </div>
+    </div>
+
+    <script>
+      let historialChatBase = "";
+
+      function lanzarPrompt(texto) {
+        document.getElementById('chatInput').value = texto;
+        enviarMensajeChat();
+      }
+
+      function limpiarConversacion() {
+        historialChatBase = "";
+        const cont = document.getElementById('chatMensajes');
+        cont.innerHTML = `
+          <div style="display: flex; flex-direction: column; align-items: flex-start;">
+            <div class="chat-burbuja burbuja-ia">
+              🧹 <b>Conversación reiniciada.</b> Puedes formular una nueva consulta o comparar otros planos.
+            </div>
+          </div>
+        `;
+      }
+
+      function agregarMensajeUI(texto, esUsuario = false) {
+        const contenedor = document.getElementById('chatMensajes');
+        const alineacion = esUsuario ? 'align-items: flex-end;' : 'align-items: flex-start;';
+        const claseBurbuja = esUsuario ? 'burbuja-user' : 'burbuja-ia';
+        
+        let textoHtml = texto.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g, '<a href="$2" target="_blank" class="text-blue-600 hover:text-blue-800 font-bold underline inline-flex items-center gap-0.5">🔗 $1</a>');
+        textoHtml = textoHtml.replace(/^### (.*$)/gim, '<h3 class="font-bold text-slate-900 text-sm mt-2 mb-1">$1</h3>');
+        textoHtml = textoHtml.replace(/^## (.*$)/gim, '<h2 class="font-bold text-slate-900 text-base mt-2 mb-1">$1</h2>');
+        textoHtml = textoHtml.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+        textoHtml = textoHtml.replace(/\* ([^\n]+)/g, '• $1');
+        textoHtml = textoHtml.replace(/\n/g, '<br>');
+        
+        const html = `
+          <div style="display: flex; flex-direction: column; ${alineacion}; width: 100%;">
+            <div class="chat-burbuja ${claseBurbuja}">${textoHtml}</div>
+          </div>
+        `;
+        contenedor.insertAdjacentHTML('beforeend', html);
+        contenedor.scrollTop = contenedor.scrollHeight;
+      }
+
+      function enviarMensajeChat() {
+        const input = document.getElementById('chatInput');
+        const mensaje = input.value.trim();
+        if (!mensaje) return;
+        
+        input.value = "";
+        input.style.height = 'auto';
+        agregarMensajeUI(mensaje, true);
+        
+        const cont = document.getElementById('chatMensajes');
+        const idLoader = 'loader-' + Date.now();
+        cont.insertAdjacentHTML('beforeend', `
+          <div id="${idLoader}" style="display: flex; flex-direction: column; align-items: flex-start;">
+            <div class="chat-burbuja burbuja-ia flex items-center gap-3 text-slate-600">
+              <div class="animate-spin w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full"></div>
+              <span>Analizando contexto de ingeniería, Drive y examinando documentos con IA...</span>
+            </div>
+          </div>
+        `);
+        cont.scrollTop = cont.scrollHeight;
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            const elLoader = document.getElementById(idLoader);
+            if (elLoader) elLoader.remove();
+            if (res && res.exito) {
+              agregarMensajeUI(res.respuesta, false);
+              historialChatBase += `Usuario: ${mensaje}\nIA: ${res.respuesta}\n`;
+            } else {
+              agregarMensajeUI("⚠️ " + (res ? res.error : "Ocurrió un error al procesar la solicitud."), false);
+            }
+          })
+          .withFailureHandler(function(err) {
+            const elLoader = document.getElementById(idLoader);
+            if (elLoader) elLoader.remove();
+            agregarMensajeUI("⚠️ Error de conexión con el motor de IA: " + err.message, false);
+          })
+          .responderConsultaAsistente(mensaje, historialChatBase);
+      }
+    </script>
+  </body>
+</html>

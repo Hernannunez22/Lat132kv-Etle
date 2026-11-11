@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        padding: 16px;
+        color: #2d3748;
+        background-color: #f7fafc;
+        margin: 0;
+      }
+      .card {
+        background: #ffffff;
+        border-radius: 8px;
+        padding: 14px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        margin-bottom: 12px;
+      }
+      h3 { margin: 0 0 8px 0; color: #2e5339; font-size: 14px; }
+      .estado-badge {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 11px;
+        font-weight: bold;
+        text-transform: uppercase;
+      }
+      .badge-Escaneando { background: #feebc8; color: #c05621; }
+      .badge-Pausado { background: #fed7d7; color: #9b2c2c; }
+      .badge-Completado { background: #c6f6d5; color: #22543d; }
+      .badge-Inactivo { background: #e2e8f0; color: #4a5568; }
+
+      .barra-contenedor {
+        background-color: #edf2f7;
+        border-radius: 8px;
+        height: 12px;
+        width: 100%;
+        overflow: hidden;
+        margin: 10px 0 6px 0;
+      }
+      .barra-relleno {
+        height: 100%;
+        width: 0%;
+        background-color: #38a169;
+        transition: width 0.3s ease;
+      }
+      .metricas {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        color: #718096;
+        font-weight: 500;
+      }
+
+      .grid-comparativa {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 8px;
+        text-align: center;
+      }
+      .box-dato {
+        background: #f7fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        padding: 8px;
+      }
+      .box-dato .numero {
+        font-size: 18px;
+        font-weight: bold;
+        color: #1a365d;
+      }
+      .box-dato .label {
+        font-size: 10px;
+        color: #718096;
+        text-transform: uppercase;
+      }
+
+      .detalle-archivo {
+        font-size: 11px;
+        color: #2d3748;
+        word-break: break-all;
+        background: #edf2f7;
+        padding: 8px;
+        border-radius: 6px;
+        margin-top: 10px;
+      }
+      .caja-watermark {
+        background: #ebf8ff;
+        border: 1px solid #bee3f8;
+        border-radius: 6px;
+        padding: 8px;
+        margin-top: 8px;
+        font-size: 11px;
+        color: #2b6cb0;
+      }
+      .acciones {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      button {
+        padding: 9px;
+        border: none;
+        border-radius: 6px;
+        font-weight: bold;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .btn-delta { background-color: #dd6b20; color: #fff; }
+      .btn-seguir { background-color: #3182ce; color: #fff; }
+      .btn-pausa { background-color: #e53e3e; color: #fff; }
+      .btn-comparar { background-color: #2e5339; color: #fff; }
+      .btn-reset { background-color: #edf2f7; color: #4a5568; font-size: 11px; }
+
+      .spinner {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border: 2px solid #cbd5e0;
+        border-top: 2px solid #3182ce;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin-right: 4px;
+        vertical-align: middle;
+      }
+      @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+      
+      /* Estilos para el Chatbot flotante */
+      .chat-btn-flotante {
+        position: fixed;
+        bottom: 16px;
+        right: 16px;
+        background-color: #4f46e5;
+        color: white;
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.2);
+        cursor: pointer;
+        z-index: 40;
+        font-size: 24px;
+        transition: transform 0.2s;
+      }
+      .chat-btn-flotante:hover { transform: scale(1.05); }
+      
+      .chat-ventana {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 80vh;
+        background: white;
+        border-top-left-radius: 16px;
+        border-top-right-radius: 16px;
+        box-shadow: 0 -4px 10px rgba(0,0,0,0.15);
+        z-index: 50;
+        display: flex;
+        flex-direction: column;
+        transform: translateY(100%);
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      .chat-ventana.abierto { transform: translateY(0); }
+      
+      .chat-burbuja { padding: 10px 12px; border-radius: 12px; max-width: 85%; line-height: 1.4; }
+      .burbuja-ia { background-color: #f1f5f9; color: #1e293b; border-bottom-left-radius: 2px; }
+      .burbuja-user { background-color: #4f46e5; color: white; border-bottom-right-radius: 2px; align-self: flex-end; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h3>⚡ Escaneo de Drive</h3>
+      <div>
+        Estado: <span id="lblEstado" class="estado-badge badge-Inactivo">Inactivo</span>
+      </div>
+
+      <div class="barra-contenedor">
+        <div id="barraProgreso" class="barra-relleno"></div>
+      </div>
+
+      <div class="metricas">
+        <span id="lblPorcentaje">0%</span>
+        <span id="lblConteo">0 / 0 PDFs</span>
+      </div>
+
+      <div class="caja-watermark">
+        🕒 <b>Último escaneo válido:</b><br>
+        <span id="lblUltimaFecha">-</span><br>
+        Novedades procesadas: <b id="lblNuevos">-</b>
+      </div>
+
+      <div class="detalle-archivo">
+        <b>Archivo en curso:</b><br>
+        <span id="lblUltimoArchivo">-</span>
+      </div>
+    </div>
+
+    <!-- TARJETA EN VIVO DE RESPALDO CLOUDFLARE R2 -->
+    <div class="card" style="border-left: 4px solid #f97316;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <h3 style="margin:0; color:#c2410c;">☁️ Respaldo Cloudflare R2</h3>
+        <span id="lblEstadoR2" class="estado-badge badge-Inactivo">Inactivo</span>
+      </div>
+
+      <div class="barra-contenedor">
+        <div id="barraProgresoR2" class="barra-relleno" style="background-color: #ea580c; width: 0%;"></div>
+      </div>
+
+      <div class="metricas">
+        <span id="lblPorcentajeR2">0%</span>
+        <span id="lblConteoR2">0 / 0 archivos</span>
+      </div>
+
+      <div class="caja-watermark" style="background:#fff7ed; border-color:#ffedd5; color:#9a3412;">
+        🕒 <b>Último Respaldo R2:</b><br>
+        <span id="lblFechaR2">-</span><br>
+        Volumen: <b id="lblResumenR2">-</b>
+      </div>
+
+      <div class="detalle-archivo" style="background:#fef2f2; border-left: 2px solid #ea580c;">
+        <b>En transferencia a R2:</b><br>
+        <span id="lblUltimoArchivoR2">-</span>
+      </div>
+
+      <!-- Botón de Respaldo Total de Todos los Archivos -->
+      <div style="margin-top: 8px;">
+        <button style="width: 100%; padding: 7px; background-color: #ea580c; color: #fff; font-size: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; border: none;" onclick="ejecutarRespaldoTotalR2()">
+          ⚡ Forzar Respaldo Total (Todos los Archivos)
+        </button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>📋 Conciliación de Elencos</h3>
+      <div class="grid-comparativa">
+        <div class="box-dato">
+          <div class="numero" id="valPlanificados">-</div>
+          <div class="label">Planificados</div>
+        </div>
+        <div class="box-dato" style="cursor: pointer;" onclick="abrirModalConciliados()" title="Hacer clic para ver el listado de planos cargados">
+          <div class="numero" id="valCargados" style="color: #2e7d32;">-</div>
+          <div class="label">Cargados (Drive) 🔍</div>
+        </div>
+      </div>
+      <div style="margin-top: 8px; font-size: 11px; text-align: center; color: #4a5568;">
+        Faltantes: <b id="valFaltantes" style="color: #c62828;">-</b> | Cobertura: <b id="valCobertura">-</b>
+      </div>
+    </div>
+
+    <!-- Visor Rápido de Últimos Documentos Subidos a Drive a Pedido -->
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <h3 style="margin:0;">🕒 Últimos Subidos a Drive</h3>
+        <button style="padding:4px 8px; font-size:10px; background:#2b6cb0; color:#fff;" onclick="cargarUltimosSubidosDrive()">🔄 Ver Últimos</button>
+      </div>
+      <div id="contenedorUltimosDrive" style="max-height:170px; overflow-y:auto; font-size:11px; border-top:1px solid #edf2f7; padding-top:6px;">
+        <span style="color:#718096; font-style:italic;">Haz clic en "🔄 Ver Últimos" para listar los últimos documentos subidos a Drive.</span>
+      </div>
+    </div>
+
+    <div class="card acciones">
+      <!-- Botón Maestro de Sincronización Total en 1 Clic -->
+      <button class="btn-delta" style="background-color: #047857; font-size: 13px; padding: 11px;" onclick="ejecutarSincronizacionTotal()">🚀 Sincronización Total en 1 Clic</button>
+
+      <!-- Botón de Gestión y Copia Automática de Interferencias -->
+      <button class="btn-seguir" style="background-color: #4f46e5; font-size: 12px;" onclick="ejecutarGestionInterferencias()">🚧 Auditar y Gestionar Interferencias</button>
+
+      <!-- Botón de Actualizar y Verificar Cambios en Elencos Oficiales -->
+      <button class="btn-delta" style="background-color: #0d9488; font-size: 12px;" onclick="ejecutarActualizacionElencos()">📑 Actualizar y Verificar Elencos (Drive)</button>
+
+      <!-- Botón de Auditoría Profunda de TODOS los Libros de Comunicación -->
+      <button class="btn-seguir" style="background-color: #3730a3; font-size: 12px;" onclick="ejecutarEscaneoTodosLosLibros()">📚 Auditar TODOS los Libros (Profundo)</button>
+
+      <button class="btn-seguir" style="background-color: #0284c7;" onclick="abrirAuditorWordModal()">📑 Auditar Informe Word de Contratista</button>
+      <button class="btn-seguir" style="background-color: #4338ca;" onclick="abrirMatrizActoresModal()">📡 Matriz de Comunicaciones y Actores</button>
+      <button class="btn-seguir" style="background-color: #2e5339;" onclick="abrirModalConciliados()">📋 Ver Lista de Planos Cargados</button>
+      <button class="btn-seguir" style="background-color: #2b6cb0;" onclick="abrirTrazabilidadModal()">🔍 Trazabilidad y Línea de Tiempo</button>
+      <button class="btn-delta" style="background-color: #059669;" onclick="ejecutarLimpiezaTotal()">✨ Normalizar Descripciones y Enlaces</button>
+      <button class="btn-delta" onclick="ejecutarEscaneoNovedades()">🔄 Escanear Solo Novedades</button>
+      <button class="btn-seguir" onclick="iniciarCiclo()">▶ Escaneo Completo Continuo</button>
+      <button class="btn-pausa" onclick="detenerCiclo()">⏸ Frenar / Pausar</button>
+      <button class="btn-comparar" style="background-color: #15803d;" onclick="actualizarConciliacion()">📈 Actualizar Tablero Físico (Hoja Resumen)</button>
+      <button class="btn-delta" style="background-color: #1e3a8a;" onclick="ejecutarActivarAutomatico()">⏰ Activar Monitoreo Auto (30 min)</button>
+      <button class="btn-reset" style="background-color: #fee2e2; color: #991b1b;" onclick="ejecutarDesactivarAutomatico()">🛑 Desactivar Monitoreo Auto</button>
+      <button class="btn-delta" style="background-color: #4a5568;" onclick="ejecutarSincronizacionMetadatos()">🕒 Sincronizar Fechas y Corregir Estados</button>
+      <button class="btn-reset" onclick="ejecutarReorganizacion()">🧹 Reorganizar Planos en Hojas</button>
+      <button class="btn-reset" onclick="reiniciarContador()">🔄 Reiniciar Contador</button>
+    </div>
+
+    <!-- Botón flotante para abrir el Chatbot Grande -->
+    <div class="chat-btn-flotante" onclick="abrirChatGrande()" title="Abrir Asistente IA a Pantalla Completa">
+      💬
+    </div>
+
+    <script>
+      let activo = false;
+      let intervalId = null;
+
+      function abrirChatGrande() {
+        google.script.run.abrirModalChat();
+      }
+
+      function ejecutarRespaldoTotalR2() {
+        if (confirm("¿Iniciar respaldo de TODOS los archivos a Cloudflare R2 sin omitir ninguno?")) {
+          const badgeR2 = document.getElementById('lblEstadoR2');
+          badgeR2.innerText = 'Iniciando...';
+          badgeR2.className = 'estado-badge badge-Escaneando';
+
+          google.script.run
+            .withSuccessHandler(function() {
+              actualizarVista();
+            })
+            .reiniciarProgresoBackupR2();
+
+          google.script.run
+            .withSuccessHandler(function() {
+              actualizarVista();
+            })
+            .sincronizarTodoACloudflareR2();
+        }
+      }
+
+      function ejecutarGestionInterferencias() {
+        const badge = document.getElementById('lblEstado');
+        badge.innerHTML = '<span class="spinner"></span> Auditando Interferencias...';
+        badge.className = 'estado-badge badge-Escaneando';
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            actualizarVista();
+            actualizarConciliacion();
+            if (res && res.ok) {
+              alert(`✅ Gestión de Interferencias finalizada:\n- Empresas auditadas: ${res.totalEmpresas}\n- Planos copiados a carpetas: ${res.copiasRealizadas}\nSe generó la hoja 'Resumen_Interferencias'.`);
+            }
+          })
+          .withFailureHandler(function(err) {
+            document.getElementById('lblUltimoArchivo').innerText = 'Error: ' + err.message;
+            actualizarVista();
+          })
+          .gestionarYAuditarInterferenciasTotal();
+      }
+
+      function ejecutarActualizacionElencos() {
+        const badge = document.getElementById('lblEstado');
+        badge.innerHTML = '<span class="spinner"></span> Verificando Elencos...';
+        badge.className = 'estado-badge badge-Escaneando';
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            actualizarVista();
+            actualizarConciliacion();
+            if (res && res.ok) {
+              const info = `✅ Verificación de Elencos completada:\n` +
+                `- Planificados totales: ${res.totalPlanificados}\n` +
+                `- Planos nuevos agregados: ${res.agregados}\n` +
+                `- Revisiones contractuales actualizadas: ${res.modificacionesRevision}`;
+              alert(info);
+            }
+          })
+          .withFailureHandler(function(err) {
+            document.getElementById('lblUltimoArchivo').innerText = 'Error: ' + err.message;
+            actualizarVista();
+          })
+          .actualizarYVerificarCambiosEnElencos();
+      }
+
+      function ejecutarSincronizacionTotal() {
+        const badge = document.getElementById('lblEstado');
+        badge.innerHTML = '<span class="spinner"></span> Sincronizando todo...';
+        badge.className = 'estado-badge badge-Escaneando';
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            actualizarVista();
+            actualizarConciliacion();
+          })
+          .withFailureHandler(function(err) {
+            document.getElementById('lblUltimoArchivo').innerText = 'Error: ' + err.message;
+            actualizarVista();
+          })
+          .ejecutarSincronizacionTotalCompleta();
+      }
+
+      function ejecutarEscaneoTodosLosLibros() {
+        const badge = document.getElementById('lblEstado');
+        badge.innerHTML = '<span class="spinner"></span> Auditando TODOS los Libros...';
+        badge.className = 'estado-badge badge-Escaneando';
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            actualizarVista();
+            actualizarConciliacion();
+          })
+          .withFailureHandler(function(err) {
+            document.getElementById('lblUltimoArchivo').innerText = 'Error: ' + err.message;
+            actualizarVista();
+          })
+          .escanearTodosLosLibrosProfundo();
+      }
+
+      function ejecutarActivarAutomatico() {
+        const badge = document.getElementById('lblEstado');
+        badge.innerHTML = '<span class="spinner"></span> Configurando activadores...';
+        google.script.run
+          .withSuccessHandler(function(res) {
+            alert("✅ Activadores instalados con éxito:\n- Monitoreo en segundo plano cada 30 minutos.\n- Reporte diario por mail a las 18:00 hs.");
+            actualizarVista();
+          })
+          .instalarActivadoresAutomaticos();
+      }
+
+      function ejecutarDesactivarAutomatico() {
+        google.script.run
+          .withSuccessHandler(function(res) {
+            alert("🛑 Monitoreo automático en segundo plano desactivado.");
+            actualizarVista();
+          })
+          .eliminarActivadoresAutomaticos();
+      }
+
+      function ejecutarLimpiezaTotal() {
+        const badge = document.getElementById('lblEstado');
+        badge.innerHTML = '<span class="spinner"></span> Normalizando descripciones...';
+        badge.className = 'estado-badge badge-Escaneando';
+
+        google.script.run
+          .withSuccessHandler(function() {
+            actualizarVista();
+            actualizarConciliacion();
+          })
+          .withFailureHandler(function(err) {
+            document.getElementById('lblUltimoArchivo').innerText = 'Error: ' + err.message;
+            actualizarVista();
+          })
+          .limpiarYNormalizarHojasMasterCompleto();
+      }
+
+      function abrirAuditorWordModal() {
+        google.script.run.abrirModalAuditorWord();
+      }
+
+      function abrirMatrizActoresModal() {
+        google.script.run.abrirModalMatrizActores();
+      }
+
+      function abrirModalConciliados() {
+        google.script.run.abrirModalDetalleConciliados();
+      }
+
+      function abrirTrazabilidadModal() {
+        google.script.run.abrirModalTrazabilidad();
+      }
+
+      function cargarUltimosSubidosDrive() {
+        const cont = document.getElementById('contenedorUltimosDrive');
+        cont.innerHTML = '<span class="spinner"></span> Consultando últimos archivos en Drive...';
+        google.script.run
+          .withSuccessHandler(function(lista) {
+            if (!lista || lista.length === 0) {
+              cont.innerHTML = '<span style="color:#718096;">No hay archivos registrados aún.</span>';
+              return;
+            }
+            let html = '';
+            lista.forEach(item => {
+              const badgeApc = item.selloApc
+                ? '<span style="background:#c6f6d5;color:#22543d;padding:1px 5px;border-radius:4px;font-weight:bold;font-size:9px;">✅ SELLO APC</span>'
+                : '<span style="background:#feebc8;color:#c05621;padding:1px 5px;border-radius:4px;font-weight:bold;font-size:9px;">Rev ' + item.revision + '</span>';
+              html += `
+                <div style="padding:5px 0; border-bottom:1px solid #f1f5f9;">
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <a href="${item.url}" target="_blank" style="font-weight:bold; color:#1a365d; text-decoration:none;">🔗 ${item.codigo}</a>
+                    ${badgeApc}
+                  </div>
+                  <div style="font-size:10px; color:#4a5568; margin-top:2px;">${item.proyecto} | 📅 ${item.fecha}</div>
+                </div>
+              `;
+            });
+            cont.innerHTML = html;
+          })
+          .obtenerUltimosDocumentosSubidosDrive(15);
+      }
+
+      function ejecutarSincronizacionMetadatos() {
+        const badge = document.getElementById('lblEstado');
+        badge.innerHTML = '<span class="spinner"></span> Sincronizando Drive...';
+        badge.className = 'estado-badge badge-Escaneando';
+
+        google.script.run
+          .withSuccessHandler(function() {
+            actualizarVista();
+            actualizarConciliacion();
+          })
+          .withFailureHandler(function(err) {
+            document.getElementById('lblUltimoArchivo').innerText = 'Error: ' + err.message;
+            actualizarVista();
+          })
+          .sincronizarYRepararMetadatosDrive();
+      }
+
+      function ejecutarEscaneoNovedades() {
+        const badge = document.getElementById('lblEstado');
+        badge.innerHTML = '<span class="spinner"></span> Buscando novedades...';
+        badge.className = 'estado-badge badge-Escaneando';
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            actualizarVista();
+            actualizarConciliacion();
+          })
+          .withFailureHandler(function(err) {
+            document.getElementById('lblUltimoArchivo').innerText = 'Error: ' + err.message;
+            actualizarVista();
+          })
+          .escanearNovedadesDesdeUltimaFecha();
+      }
+
+      function ejecutarReorganizacion() {
+        const badge = document.getElementById('lblEstado');
+        badge.innerHTML = '<span class="spinner"></span> Reorganizando...';
+        google.script.run
+          .withSuccessHandler(function() {
+            actualizarVista();
+            actualizarConciliacion();
+          })
+          .reorganizarPlanosEnHojasCorrectas();
+      }
+
+      function actualizarVista() {
+        google.script.run.withSuccessHandler(function(res) {
+          const totalVal = Math.max(res.total, res.procesados);
+          const pctVal = totalVal > 0 ? Math.min(100, Math.round((res.procesados / totalVal) * 100)) : 0;
+          
+          document.getElementById('lblPorcentaje').innerText = (res.estado === 'Completado' ? '100' : pctVal) + '%';
+          document.getElementById('barraProgreso').style.width = (res.estado === 'Completado' ? '100' : pctVal) + '%';
+          document.getElementById('lblConteo').innerText = res.procesados + ' / ' + totalVal + ' PDFs';
+          document.getElementById('lblUltimoArchivo').innerText = res.ultimoArchivo || '-';
+          document.getElementById('lblUltimaFecha').innerText = res.ultimaFechaEscaneo || 'Sin registro previo';
+          document.getElementById('lblNuevos').innerText = res.nuevosEncontrados || '0';
+          
+          const badge = document.getElementById('lblEstado');
+          badge.innerText = res.estado;
+          badge.className = 'estado-badge badge-' + (res.estado.includes('Escaneando') ? 'Escaneando' : res.estado);
+        }).obtenerEstadoProgreso();
+
+        // Actualizar en paralelo el progreso de Cloudflare R2
+        google.script.run.withSuccessHandler(function(r2) {
+          if (!r2) return;
+          const pctR2 = r2.porcentaje || 0;
+          document.getElementById('lblPorcentajeR2').innerText = pctR2 + '%';
+          document.getElementById('barraProgresoR2').style.width = pctR2 + '%';
+          document.getElementById('lblConteoR2').innerText = `${r2.actual || 0} / ${r2.total || 0} archivos`;
+          document.getElementById('lblUltimoArchivoR2').innerText = r2.ultimoArchivo || '-';
+          document.getElementById('lblFechaR2').innerText = r2.fechaUltimo || 'Sin registro';
+          document.getElementById('lblResumenR2').innerText = r2.resumen || '-';
+
+          const badgeR2 = document.getElementById('lblEstadoR2');
+          badgeR2.innerText = r2.estado;
+          if (r2.estado.includes('Transfiriendo') || r2.estado.includes('Iniciando')) {
+            badgeR2.className = 'estado-badge badge-Escaneando';
+          } else if (r2.estado === 'Completado') {
+            badgeR2.className = 'estado-badge badge-Completado';
+          } else {
+            badgeR2.className = 'estado-badge badge-Inactivo';
+          }
+        }).obtenerEstadoProgresoR2();
+      }
+
+      function actualizarConciliacion() {
+        google.script.run.withSuccessHandler(function(res) {
+          document.getElementById('valPlanificados').innerText = res.totalPlanificados;
+          document.getElementById('valCargados').innerText = res.totalCargados;
+          document.getElementById('valFaltantes').innerText = res.faltantes;
+          document.getElementById('valCobertura').innerText = res.porcentajeGlobal + '%';
+        }).generarReporteComparacionElencos();
+      }
+
+      function procesarPaso() {
+        if (!activo) return;
+
+        const badge = document.getElementById('lblEstado');
+        badge.innerHTML = '<span class="spinner"></span> Procesando...';
+        badge.className = 'estado-badge badge-Escaneando';
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            actualizarVista();
+
+            if (res.finalizado || res.estado === 'Completado') {
+              activo = false;
+              badge.innerText = 'Completado';
+              badge.className = 'estado-badge badge-Completado';
+              actualizarConciliacion();
+              return;
+            }
+
+            if (res.estado === 'Pausado' || !activo) {
+              activo = false;
+              badge.innerText = 'Pausado';
+              badge.className = 'estado-badge badge-Pausado';
+              return;
+            }
+
+            procesarPaso();
+          })
+          .withFailureHandler(function(err) {
+            activo = false;
+            document.getElementById('lblUltimoArchivo').innerText = 'Error: ' + err.message;
+            actualizarVista();
+          })
+          .procesarUnArchivo();
+      }
+
+      function iniciarCiclo() {
+        activo = true;
+        procesarPaso();
+      }
+
+      function detenerCiclo() {
+        activo = false;
+        google.script.run.withSuccessHandler(actualizarVista).pausarProceso();
+      }
+
+      function reiniciarContador() {
+        if (confirm("¿Reiniciar el contador a 0?")) {
+          activo = false;
+          google.script.run.withSuccessHandler(function() {
+            actualizarVista();
+            actualizarConciliacion();
+          }).reiniciarProcesoCompleto();
+        }
+      }
+
+      actualizarVista();
+      actualizarConciliacion();
+      setInterval(actualizarVista, 4000);
+    </script>
+  </body>
+</html>

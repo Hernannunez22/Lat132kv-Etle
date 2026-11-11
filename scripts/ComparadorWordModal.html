@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+      ::-webkit-scrollbar { width: 6px; height: 6px; }
+      ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+    </style>
+  </head>
+  <body class="p-4 md:p-6 text-slate-800 antialiased">
+    <div class="max-w-7xl mx-auto space-y-4">
+
+      <!-- Header Principal -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <span class="p-2.5 bg-sky-100 text-sky-800 rounded-xl text-xl font-bold">📑</span>
+          <div>
+            <h1 class="text-lg font-bold text-slate-900 leading-tight">Auditor de Entregas: Word de Contratista vs. Drive / Master</h1>
+            <p class="text-xs text-slate-500">Cotejo triangular automático: Declarado en Word ➔ Archivo real en Drive ➔ Registrado en Master</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <button id="btnExportarSheet" onclick="exportarASheet()" class="hidden px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold rounded-lg shadow-sm transition-all flex items-center gap-1.5">
+            <span>📊 Guardar Auditoría en Nueva Pestaña</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Banner de Error Inline (Completamente cerrado e independiente) -->
+      <div id="bannerError" class="hidden bg-rose-50 border border-rose-200 text-rose-800 rounded-xl p-4 text-xs font-semibold flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <span>⚠️</span>
+          <span id="mensajeErrorTxt">Ocurrió un error.</span>
+        </div>
+        <button type="button" onclick="ocultarBannerError()" class="text-rose-600 hover:text-rose-900 font-bold ml-2">✕</button>
+      </div>
+
+      <!-- Zona de Carga del Documento Word, PDF o Imagen -->
+      <div id="cajaCarga" class="bg-white border-2 border-dashed border-sky-300 rounded-xl p-6 shadow-sm text-center">
+        <div class="max-w-md mx-auto space-y-3">
+          <div class="text-3xl">📄 📑 🖼️</div>
+          <h2 class="text-sm font-bold text-slate-800">Cargar PDF, Word (.docx), Imagen o Pegar con Ctrl+V</h2>
+          <p class="text-xs text-slate-500">
+            Sube el informe entregado por la contratista en <b>PDF</b>, <b>Word (.docx)</b>, o la <b>imagen/captura</b> de la tabla. Si copiaste la tabla, solo presiona <b>Ctrl + V</b> en esta ventana.
+          </p>
+
+          <div class="flex flex-col sm:flex-row items-center justify-center gap-2 pt-2">
+            <label class="cursor-pointer px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded-lg shadow-sm transition-all flex items-center gap-1.5">
+              <span>📁 Seleccionar PDF, Word o Imagen</span>
+              <input type="file" id="inputArchivoWord" accept=".pdf,.docx,.doc,image/png,image/jpeg,image/jpg,image/webp" class="hidden" onchange="manejarArchivoWord(event)" />
+            </label>
+            <span class="text-xs text-slate-400 font-semibold">o</span>
+            <button type="button" onclick="alternarCajaTexto()" class="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg border border-slate-300">
+              📋 Pegar Texto Copiado
+            </button>
+          </div>
+
+          <!-- Caja de texto pegado directo (Oculta por defecto) -->
+          <div id="cajaTextoPegado" class="hidden text-left pt-3 space-y-2">
+            <textarea id="txtPegado" rows="4" placeholder="Pega aquí las filas o texto copiado de la tabla..." class="w-full text-xs p-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-600"></textarea>
+            <div class="text-right">
+              <button type="button" onclick="procesarTextoPegado()" class="px-4 py-1.5 bg-sky-700 hover:bg-sky-800 text-white text-xs font-bold rounded-lg">
+                Procesar y Cotejar Texto
+              </button>
+            </div>
+          </div>
+
+          <!-- Indicador visual de soporte para Ctrl + V -->
+          <div class="pt-2 text-[11px] text-slate-400">
+            💡 <i>Tip: Puedes sacar captura de pantalla de la tabla (Win + Shift + S) y pegarla directamente con <b>Ctrl + V</b></i>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Loader de Procesamiento IA -->
+      <div id="loaderProcesando" class="hidden bg-white border border-slate-200 rounded-xl p-10 text-center shadow-sm">
+        <div class="inline-block animate-spin w-8 h-8 border-4 border-sky-600 border-t-transparent rounded-full mb-3"></div>
+        <p class="text-sm font-semibold text-slate-700">Analizando el documento (PDF/Word/Imagen) con IA Gemini...</p>
+        <p class="text-xs text-slate-400 mt-1">Leyendo códigos, revisiones y fechas para cotejar contra Drive y Master...</p>
+      </div>
+
+      <!-- Tarjetas KPI del Cruce (Aparecen al procesar) -->
+      <div id="contenedorKpis" class="hidden grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div class="bg-white border border-slate-200 rounded-xl p-3 shadow-sm text-center">
+          <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Declarados en Word</div>
+          <div id="kpiTotalWord" class="text-xl font-bold text-slate-800 mt-0.5">-</div>
+        </div>
+        <div class="bg-white border border-emerald-200 bg-emerald-50/30 rounded-xl p-3 shadow-sm text-center cursor-pointer hover:bg-emerald-50" onclick="filtrarCruce('COINCIDENTE')">
+          <div class="text-[10px] font-bold uppercase tracking-wider text-emerald-700">✅ Coincidentes (En Drive)</div>
+          <div id="kpiCoincidentes" class="text-xl font-bold text-emerald-700 mt-0.5">-</div>
+        </div>
+        <div class="bg-white border border-amber-200 bg-amber-50/30 rounded-xl p-3 shadow-sm text-center cursor-pointer hover:bg-amber-50" onclick="filtrarCruce('DISCREPANCIA_REV')">
+          <div class="text-[10px] font-bold uppercase tracking-wider text-amber-700">⚠️ Discrepancia Rev</div>
+          <div id="kpiDiscrepancias" class="text-xl font-bold text-amber-700 mt-0.5">-</div>
+        </div>
+        <div class="bg-white border border-rose-200 bg-rose-50/30 rounded-xl p-3 shadow-sm text-center cursor-pointer hover:bg-rose-50" onclick="filtrarCruce('FALTANTE_DRIVE')">
+          <div class="text-[10px] font-bold uppercase tracking-wider text-rose-700">❌ Faltantes en Drive</div>
+          <div id="kpiFaltantesDrive" class="text-xl font-bold text-rose-700 mt-0.5">-</div>
+        </div>
+        <div class="bg-white border border-sky-200 bg-sky-50/30 rounded-xl p-3 shadow-sm text-center">
+          <div class="text-[10px] font-bold uppercase tracking-wider text-sky-700">% Verificado Real</div>
+          <div id="kpiPctVerificado" class="text-xl font-bold text-sky-700 mt-0.5">-</div>
+        </div>
+      </div>
+
+      <!-- Barra de Filtros y Búsqueda de Resultados -->
+      <div id="contenedorFiltros" class="hidden flex flex-col md:flex-row items-center gap-2 border-b border-slate-200 pb-3">
+        <div class="flex items-center gap-1.5 overflow-x-auto w-full md:w-auto">
+          <button id="btnFiltroTodos" onclick="setFiltro('TODOS')" class="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-sky-700 text-white shadow-sm whitespace-nowrap">
+            Todos (<span id="cntTodos">0</span>)
+          </button>
+          <button id="btnFiltroCoincidentes" onclick="setFiltro('COINCIDENTE')" class="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-slate-100 hover:bg-slate-200 text-emerald-800 whitespace-nowrap">
+            ✅ Coincidentes (<span id="cntCoinc">0</span>)
+          </button>
+          <button id="btnFiltroDiscrepancias" onclick="setFiltro('DISCREPANCIA_REV')" class="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-slate-100 hover:bg-slate-200 text-amber-700 whitespace-nowrap">
+            ⚠️ Discrepancia Rev (<span id="cntDisc">0</span>)
+          </button>
+          <button id="btnFiltroFaltantes" onclick="setFiltro('FALTANTE_DRIVE')" class="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-slate-100 hover:bg-slate-200 text-rose-700 whitespace-nowrap">
+            ❌ No Están en Drive (<span id="cntFalt">0</span>)
+          </button>
+        </div>
+
+        <div class="ml-auto w-full md:w-72">
+          <input 
+            type="text" 
+            id="txtBuscadorCruce" 
+            placeholder="Buscar por código, título o nota..." 
+            oninput="renderizarTablaCruce()"
+            class="w-full px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-600"
+          />
+        </div>
+      </div>
+
+      <!-- Tabla de Cruce Triangular -->
+      <div id="contenedorTablaCruce" class="hidden bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+        <div class="max-h-[460px] overflow-y-auto">
+          <table class="w-full text-left text-xs border-collapse">
+            <thead class="bg-sky-950 text-white uppercase text-[10px] sticky top-0 z-10 font-bold tracking-wider">
+              <tr>
+                <th class="p-3">Estado de Recepción</th>
+                <th class="p-3">Obra / Proyecto</th>
+                <th class="p-3">Código Declarado (Word)</th>
+                <th class="p-3">Descripción en Informe</th>
+                <th class="p-3 text-center">Rev Word</th>
+                <th class="p-3 text-center">Rev en Drive</th>
+                <th class="p-3">Fecha en Drive</th>
+                <th class="p-3">Documento / Nota en Drive</th>
+                <th class="p-3">Diagnóstico de Auditoría</th>
+              </tr>
+            </thead>
+            <tbody id="tbodyCruce" class="divide-y divide-slate-100">
+              <!-- Filas dinámicas -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+    <script>
+      let datosAuditoria = null;
+      let filtroActivo = 'TODOS';
+
+      // Captura global de eventos de pegado (Ctrl + V) para imágenes desde el portapapeles
+      window.addEventListener('paste', function(e) {
+        const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].type.indexOf('image') !== -1) {
+            const blob = items[i].getAsFile();
+            procesarBlobArchivo(blob, 'Captura_Portapapeles_' + new Date().getTime() + '.png');
+            e.preventDefault();
+            return;
+          }
+        }
+      });
+
+      function alternarCajaTexto() {
+        const box = document.getElementById('cajaTextoPegado');
+        box.classList.toggle('hidden');
+      }
+
+      function mostrarBannerError(msg) {
+        document.getElementById('mensajeErrorTxt').innerText = msg;
+        document.getElementById('bannerError').classList.remove('hidden');
+      }
+
+      function ocultarBannerError() {
+        document.getElementById('bannerError').classList.add('hidden');
+      }
+
+      function manejarArchivoWord(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+        procesarBlobArchivo(file, file.name);
+      }
+
+      function procesarBlobArchivo(file, nombreArchivo) {
+        ocultarBannerError();
+        mostrarCargando(true);
+        const reader = new FileReader();
+
+        reader.onload = function(e) {
+          const raw = e.target.result;
+          const base64 = raw.split(',')[1] || raw;
+
+          google.script.run
+            .withSuccessHandler(function(res) {
+              mostrarCargando(false);
+              if (res.exito) {
+                datosAuditoria = res;
+                mostrarResultados(res);
+              } else {
+                mostrarBannerError(res.error || "Error al procesar el archivo.");
+              }
+            })
+            .withFailureHandler(function(err) {
+              mostrarCargando(false);
+              mostrarBannerError("Error de comunicación: " + (err.message || String(err)));
+            })
+            .procesarYCotejarArchivoWord({
+              base64: base64,
+              nombreArchivo: nombreArchivo,
+              mimeType: file.type || "application/octet-stream"
+            });
+        };
+
+        reader.readAsDataURL(file);
+      }
+
+      function procesarTextoPegado() {
+        const txt = document.getElementById('txtPegado').value.trim();
+        if (!txt) {
+          mostrarBannerError("Por favor pega el texto antes de procesar.");
+          return;
+        }
+
+        ocultarBannerError();
+        mostrarCargando(true);
+        google.script.run
+          .withSuccessHandler(function(res) {
+            mostrarCargando(false);
+            if (res.exito) {
+              datosAuditoria = res;
+              mostrarResultados(res);
+            } else {
+              mostrarBannerError(res.error || "Error al procesar el texto.");
+            }
+          })
+          .withFailureHandler(function(err) {
+            mostrarCargando(false);
+            mostrarBannerError("Error: " + (err.message || String(err)));
+          })
+          .procesarYCotejarArchivoWord({
+            textoPlano: txt,
+            nombreArchivo: "Texto_Pegado_Word.docx"
+          });
+      }
+
+      function mostrarCargando(visible) {
+        if (visible) {
+          document.getElementById('loaderProcesando').classList.remove('hidden');
+          document.getElementById('cajaCarga').classList.add('hidden');
+          document.getElementById('contenedorKpis').classList.add('hidden');
+          document.getElementById('contenedorFiltros').classList.add('hidden');
+          document.getElementById('contenedorTablaCruce').classList.add('hidden');
+        } else {
+          document.getElementById('loaderProcesando').classList.add('hidden');
+          document.getElementById('cajaCarga').classList.remove('hidden');
+        }
+      }
+
+      function mostrarResultados(res) {
+        document.getElementById('btnExportarSheet').classList.remove('hidden');
+        document.getElementById('contenedorKpis').classList.remove('hidden');
+        document.getElementById('contenedorFiltros').classList.remove('hidden');
+        document.getElementById('contenedorTablaCruce').classList.remove('hidden');
+
+        document.getElementById('kpiTotalWord').innerText = res.kpis.totalDeclarados;
+        document.getElementById('kpiCoincidentes').innerText = res.kpis.coincidentes;
+        document.getElementById('kpiDiscrepancias').innerText = res.kpis.discrepanciasRev;
+        document.getElementById('kpiFaltantesDrive').innerText = res.kpis.faltantesEnDrive;
+        document.getElementById('kpiPctVerificado').innerText = res.kpis.pctRecepcion + '%';
+
+        document.getElementById('cntTodos').innerText = res.kpis.totalDeclarados;
+        document.getElementById('cntCoinc').innerText = res.kpis.coincidentes;
+        document.getElementById('cntDisc').innerText = res.kpis.discrepanciasRev;
+        document.getElementById('cntFalt').innerText = res.kpis.faltantesEnDrive;
+
+        renderizarTablaCruce();
+      }
+
+      function setFiltro(f) {
+        filtroActivo = f;
+        const botones = {
+          'TODOS': document.getElementById('btnFiltroTodos'),
+          'COINCIDENTE': document.getElementById('btnFiltroCoincidentes'),
+          'DISCREPANCIA_REV': document.getElementById('btnFiltroDiscrepancias'),
+          'FALTANTE_DRIVE': document.getElementById('btnFiltroFaltantes')
+        };
+
+        Object.keys(botones).forEach(k => {
+          if (k === f) {
+            botones[k].className = 'px-3.5 py-1.5 text-xs font-bold rounded-lg bg-sky-700 text-white shadow-sm whitespace-nowrap';
+          } else {
+            botones[k].className = 'px-3.5 py-1.5 text-xs font-bold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 whitespace-nowrap';
+          }
+        });
+
+        renderizarTablaCruce();
+      }
+
+      function filtrarCruce(f) {
+        setFiltro(f);
+      }
+
+      function renderizarTablaCruce() {
+        if (!datosAuditoria || !datosAuditoria.items) return;
+
+        const q = (document.getElementById('txtBuscadorCruce').value || '').toLowerCase().trim();
+        const tbody = document.getElementById('tbodyCruce');
+        tbody.innerHTML = '';
+
+        const filtrados = datosAuditoria.items.filter(item => {
+          const matchQ = !q || 
+            item.codigoDeclarado.toLowerCase().includes(q) ||
+            item.descripcionDeclarada.toLowerCase().includes(q) ||
+            item.proyecto.toLowerCase().includes(q) ||
+            (item.remitoDrive && item.remitoDrive.toLowerCase().includes(q));
+
+          if (!matchQ) return false;
+
+          if (filtroActivo !== 'TODOS' && item.estadoCruce !== filtroActivo) return false;
+          return true;
+        });
+
+        if (filtrados.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="9" class="p-8 text-center text-slate-400">No se encontraron ítems para los filtros seleccionados.</td></tr>`;
+          return;
+        }
+
+        filtrados.forEach(row => {
+          let badgeEstado = '';
+          if (row.estadoCruce === 'COINCIDENTE') {
+            badgeEstado = `<span class="px-2.5 py-1 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 whitespace-nowrap">✅ Coincidente</span>`;
+          } else if (row.estadoCruce === 'DISCREPANCIA_REV') {
+            badgeEstado = `<span class="px-2.5 py-1 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 whitespace-nowrap">⚠️ Dif. Revisión</span>`;
+          } else {
+            badgeEstado = `<span class="px-2.5 py-1 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200 whitespace-nowrap">❌ No en Drive</span>`;
+          }
+
+          let linkDrive = `<span class="text-slate-400 italic">No recibido</span>`;
+          if (row.existeEnDrive) {
+            linkDrive = row.urlDrive 
+              ? `<a href="${row.urlDrive}" target="_blank" class="text-sky-600 hover:underline font-bold">🔗 ${row.remitoDrive || 'Ver en Drive'}</a>`
+              : `<b class="text-slate-700">${row.remitoDrive}</b>`;
+          }
+
+          const tr = `
+            <tr class="hover:bg-slate-50 transition-colors">
+              <td class="p-3">${badgeEstado}</td>
+              <td class="p-3 font-semibold text-slate-800">${row.proyecto}</td>
+              <td class="p-3 font-mono font-bold text-sky-900">${row.codigoDeclarado}</td>
+              <td class="p-3 text-slate-600 max-w-xs truncate" title="${row.descripcionDeclarada}">${row.descripcionDeclarada}</td>
+              <td class="p-3 text-center font-bold text-slate-700">${row.revDeclarada || '-'}</td>
+              <td class="p-3 text-center font-bold ${row.revDeclarada !== row.revEnDrive && row.revEnDrive !== '-' ? 'text-amber-700 bg-amber-50 rounded' : 'text-slate-800'}">${row.revEnDrive}</td>
+              <td class="p-3 text-slate-600 whitespace-nowrap">${row.fechaEnDrive}</td>
+              <td class="p-3">${linkDrive}</td>
+              <td class="p-3 text-[11px] text-slate-600 max-w-sm">${row.detalleCruce}</td>
+            </tr>
+          `;
+          tbody.insertAdjacentHTML('beforeend', tr);
+        });
+      }
+
+      function exportarASheet() {
+        if (!datosAuditoria) return;
+
+        const btn = document.getElementById('btnExportarSheet');
+        const txtOrig = btn.innerHTML;
+        btn.innerText = 'Guardando pestaña...';
+        btn.disabled = true;
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            btn.innerText = '✅ Guardado';
+            mostrarBannerError("Pestaña creada con éxito: " + res.nombreHoja);
+            document.getElementById('bannerError').className = "bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl p-4 text-xs font-semibold flex items-center justify-between";
+          })
+          .withFailureHandler(function(err) {
+            btn.innerHTML = txtOrig;
+            btn.disabled = false;
+            mostrarBannerError("Error al exportar: " + (err.message || String(err)));
+          })
+          .exportarAuditoriaWordASheet(datosAuditoria);
+      }
+    </script>
+  </body>
+</html>

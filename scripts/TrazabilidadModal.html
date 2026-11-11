@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      body {
+        font-family: 'Inter', sans-serif;
+        background-color: #f8fafc;
+      }
+      /* Custom scrollbars for clean timeline rendering */
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #f1f5f9;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #cbd5e1;
+        border-radius: 9999px;
+      }
+      .timeline-dot {
+        box-shadow: 0 0 0 4px #ffffff;
+      }
+    </style>
+  </head>
+  <body class="p-4 md:p-6 text-slate-800 antialiased">
+    <div class="max-w-4xl mx-auto space-y-4">
+      
+      <!-- Encabezado Superior -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-3">
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="p-2 bg-emerald-100 text-emerald-800 rounded-lg text-lg font-bold">🔍</span>
+            <div>
+              <h1 class="text-lg font-bold text-slate-900 leading-tight">Trazabilidad y Línea de Tiempo de Documentos</h1>
+              <p class="text-xs text-slate-500">Historial completo de emisiones, revisiones y envíos (Contratista ➔ Inspección ➔ TRANSNOA)</p>
+            </div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="buscarDesdeCeldaActiva()" class="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors border border-slate-300">
+            <span>🎯</span> Tomar Celda Seleccionada
+          </button>
+        </div>
+      </div>
+
+      <!-- Barra de Búsqueda Rápida con Autocompletado -->
+      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+        <label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+          Buscar por Código Oficial, Título de Plano o N° de Remito / Nota:
+        </label>
+        <div class="relative flex items-center">
+          <input 
+            type="text" 
+            id="inputBusqueda" 
+            placeholder="Ej: ET-VQ-OE-PL-101, ET-VQ-OEM-PL-317, o 501..."
+            class="w-full px-4 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:bg-white transition-all pl-10"
+            oninput="filtrarSugerencias()"
+            onkeydown="manejarTeclado(event)"
+          />
+          <div class="absolute left-3 text-slate-400">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+            </svg>
+          </div>
+          <button 
+            onclick="consultarTrazabilidad()" 
+            class="ml-2 px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs rounded-lg shadow-sm transition-all whitespace-nowrap flex items-center gap-1.5">
+            <span>Rastrear</span>
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Contenedor flotante de sugerencias rápidas -->
+        <div id="contenedorSugerencias" class="hidden mt-1 max-h-48 overflow-y-auto bg-white border border-slate-200 rounded-lg shadow-lg text-xs divide-y divide-slate-100 z-50"></div>
+      </div>
+
+      <!-- Banner de Error Inline -->
+      <div id="bannerError" class="hidden bg-rose-50 border border-rose-200 text-rose-800 rounded-xl p-4 text-xs font-semibold flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <span>⚠️</span>
+          <span id="mensajeErrorTxt">Error al consultar trazabilidad</span>
+        </div>
+        <button onclick="document.getElementById('bannerError').classList.add('hidden')" class="text-rose-600 hover:text-rose-900 font-bold ml-2">✕</button>
+      </div>
+
+      <!-- Estado de Carga -->
+      <div id="estadoCargando" class="hidden bg-white border border-slate-200 rounded-xl p-8 text-center shadow-sm">
+        <div class="inline-block animate-spin w-8 h-8 border-4 border-emerald-600 border-t-transparent rounded-full mb-3"></div>
+        <p class="text-sm font-semibold text-slate-700">Consultando historial en Hojas Master y Transmittals...</p>
+        <p class="text-xs text-slate-400 mt-1">Reconstruyendo el ciclo de vida documental...</p>
+      </div>
+
+      <!-- Contenedor Principal de Resultados -->
+      <div id="resultadoTrazabilidad" class="hidden space-y-4">
+        
+        <!-- Ficha de Datos Principales del Plano -->
+        <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+          <div class="flex flex-col md:flex-row justify-between md:items-center gap-3 border-b border-slate-100 pb-3 mb-3">
+            <div>
+              <span id="badgeProyecto" class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
+                Proyecto
+              </span>
+              <h2 id="txtCodigoPlano" class="text-lg font-bold text-slate-900 mt-1">ET-VQ-OE-PL-101</h2>
+              <p id="txtDescripcionPlano" class="text-xs text-slate-600 mt-0.5">Unifilar General con ampliación de campos</p>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <span id="badgeEstadoCircuito" class="px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                Abierto
+              </span>
+              <span id="badgeEtapaActual" class="px-3 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200">
+                En Revisión Interna
+              </span>
+            </div>
+          </div>
+
+          <!-- Métricas Resumen -->
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-center pt-1">
+            <div class="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+              <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Revisión Actual</div>
+              <div id="txtRevActual" class="text-base font-bold text-slate-800">EO</div>
+            </div>
+            <div class="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+              <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Ciclos de Revisión</div>
+              <div id="txtCiclosTotal" class="text-base font-bold text-indigo-700">Ciclo 1</div>
+            </div>
+            <div class="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+              <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500">En Manos De</div>
+              <div id="txtResponsable" class="text-base font-bold text-slate-800">Inspección</div>
+            </div>
+            <div class="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+              <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Semáforo SLA (Plazo)</div>
+              <div id="txtDiasTranscurridos" class="text-sm font-bold text-emerald-700 mt-0.5">🟢 En plazo</div>
+            </div>
+          </div>
+
+          <!-- Historial de Links Multi-Revisión -->
+          <div id="contenedorMultiRevision" class="hidden mt-3 pt-3 border-t border-slate-100 flex items-center gap-2 flex-wrap">
+            <span class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">📚 Revisiones en Drive:</span>
+            <div id="listaChipsRevisiones" class="flex items-center gap-1.5 flex-wrap"></div>
+          </div>
+        </div>
+
+        <!-- Línea de Tiempo Visual Cronológica -->
+        <div class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+          <div class="flex items-center justify-between mb-4 pb-2 border-b border-slate-100">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+              <span>🕒</span> Secuencia Cronológica de Movimientos
+            </h3>
+            <span id="txtCantidadEventos" class="text-xs font-medium text-slate-500">0 eventos registrados</span>
+          </div>
+
+          <!-- Contenedor del listado vertical -->
+          <div id="timelineContainer" class="relative pl-6 md:pl-8 space-y-6 before:content-[''] before:absolute before:left-[11px] md:before:left-[15px] before:top-2 before:bottom-2 before:w-[2px] before:bg-slate-200">
+            <!-- Eventos generados dinámicamente -->
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Estado Vacío o Sin Resultados -->
+      <div id="estadoVacio" class="hidden bg-white border border-slate-200 rounded-xl p-8 text-center shadow-sm">
+        <div class="text-3xl mb-2">🔎</div>
+        <h3 class="text-sm font-bold text-slate-800">No se encontraron movimientos registrados</h3>
+        <p class="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+          Verifica que el código o número de remito coincida con el listado oficial o que haya sido registrado previamente en las hojas Master o en el Histórico de Transmittals.
+        </p>
+      </div>
+
+    </div>
+
+    <script>
+      let catalogoSugerencias = [];
+
+      window.onload = function() {
+        // Cargar lista ligera de códigos para autocompletado
+        google.script.run
+          .withSuccessHandler(function(lista) {
+            catalogoSugerencias = lista || [];
+          })
+          .obtenerCatalogoCodigosParaTrazabilidad();
+
+        // Si se abrió con una celda preseleccionada
+        buscarDesdeCeldaActiva();
+      };
+
+      function buscarDesdeCeldaActiva() {
+        google.script.run
+          .withSuccessHandler(function(codigoSeleccionado) {
+            if (codigoSeleccionado) {
+              document.getElementById('inputBusqueda').value = codigoSeleccionado;
+              consultarTrazabilidad();
+            }
+          })
+          .obtenerCodigoDeCeldaActiva();
+      }
+
+      function filtrarSugerencias() {
+        const query = document.getElementById('inputBusqueda').value.trim().toLowerCase();
+        const contenedor = document.getElementById('contenedorSugerencias');
+
+        if (!query || query.length < 2) {
+          contenedor.classList.add('hidden');
+          contenedor.innerHTML = '';
+          return;
+        }
+
+        const filtrados = catalogoSugerencias.filter(item => {
+          return item.cod.toLowerCase().includes(query) || 
+                 item.desc.toLowerCase().includes(query);
+        }).slice(0, 8);
+
+        if (filtrados.length === 0) {
+          contenedor.classList.add('hidden');
+          contenedor.innerHTML = '';
+          return;
+        }
+
+        let html = '';
+        filtrados.forEach(item => {
+          html += `
+            <div class="p-2.5 hover:bg-slate-50 cursor-pointer flex justify-between items-center" onclick="seleccionarSugerencia('${item.cod}')">
+              <div>
+                <span class="font-bold text-slate-900">${item.cod}</span>
+                <span class="text-slate-500 ml-2">${item.desc}</span>
+              </div>
+              <span class="text-[10px] uppercase font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-600">${item.proy}</span>
+            </div>
+          `;
+        });
+
+        contenedor.innerHTML = html;
+        contenedor.classList.remove('hidden');
+      }
+
+      function seleccionarSugerencia(cod) {
+        document.getElementById('inputBusqueda').value = cod;
+        document.getElementById('contenedorSugerencias').classList.add('hidden');
+        consultarTrazabilidad();
+      }
+
+      function manejarTeclado(e) {
+        if (e.key === 'Enter') {
+          document.getElementById('contenedorSugerencias').classList.add('hidden');
+          consultarTrazabilidad();
+        }
+      }
+
+      function consultarTrazabilidad() {
+        const query = document.getElementById('inputBusqueda').value.trim();
+        if (!query) return;
+
+        document.getElementById('bannerError').classList.add('hidden');
+        document.getElementById('contenedorSugerencias').classList.add('hidden');
+        document.getElementById('resultadoTrazabilidad').classList.add('hidden');
+        document.getElementById('estadoVacio').classList.add('hidden');
+        document.getElementById('estadoCargando').classList.remove('hidden');
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            document.getElementById('estadoCargando').classList.add('hidden');
+            if (!res || !res.encontrado) {
+              document.getElementById('estadoVacio').classList.remove('hidden');
+              return;
+            }
+            renderizarResultado(res);
+          })
+          .withFailureHandler(function(err) {
+            document.getElementById('estadoCargando').classList.add('hidden');
+            const msg = (err && err.message) ? err.message : String(err);
+            document.getElementById('mensajeErrorTxt').innerText = 'Error al consultar trazabilidad: ' + msg;
+            document.getElementById('bannerError').classList.remove('hidden');
+          })
+          .obtenerTrazabilidadCompleta(query);
+      }
+
+      function renderizarResultado(res) {
+        document.getElementById('resultadoTrazabilidad').classList.remove('hidden');
+
+        // Header info
+        document.getElementById('txtCodigoPlano').innerText = res.codigo;
+        document.getElementById('txtDescripcionPlano').innerText = res.descripcion;
+        document.getElementById('badgeProyecto').innerText = res.proyecto;
+
+        document.getElementById('txtRevActual').innerText = res.revisionActual || '-';
+        document.getElementById('txtCiclosTotal').innerText = res.cicloActual || 'Ciclo 1';
+        document.getElementById('txtResponsable').innerText = res.responsableActual || 'Inspección';
+
+        const elSla = document.getElementById('txtDiasTranscurridos');
+        if (res.semaforoSLA && res.semaforoSLA.etiqueta) {
+          elSla.innerText = res.semaforoSLA.etiqueta;
+          elSla.style.color = res.semaforoSLA.colorTexto || '#15803d';
+        } else {
+          elSla.innerText = (res.diasEnCircuito || 0) + ' días';
+        }
+
+        // Renderizar chips de todas las revisiones previas con enlace directo
+        const contMulti = document.getElementById('contenedorMultiRevision');
+        const chipsDiv = document.getElementById('listaChipsRevisiones');
+        chipsDiv.innerHTML = '';
+        if (res.versionesMultiRev && res.versionesMultiRev.length > 0) {
+          contMulti.classList.remove('hidden');
+          res.versionesMultiRev.forEach(v => {
+            chipsDiv.insertAdjacentHTML('beforeend', `
+              <a href="${v.url}" target="_blank" class="px-2.5 py-1 rounded-md text-xs font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 transition-colors inline-flex items-center gap-1">
+                <span>📄 ${v.etiqueta}</span>
+                <span>↗</span>
+              </a>
+            `);
+          });
+        } else {
+          contMulti.classList.add('hidden');
+        }
+
+        // Badges
+        const badgeEst = document.getElementById('badgeEstadoCircuito');
+        badgeEst.innerText = res.estadoCircuito;
+        if (res.estadoCircuito === 'Cerrado') {
+          badgeEst.className = 'px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300';
+        } else {
+          badgeEst.className = 'px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300';
+        }
+
+        const badgeEtapa = document.getElementById('badgeEtapaActual');
+        badgeEtapa.innerText = res.etapaActual;
+
+        // Timeline container
+        const cont = document.getElementById('timelineContainer');
+        cont.innerHTML = '';
+
+        document.getElementById('txtCantidadEventos').innerText = `${res.historial.length} movimientos`;
+
+        res.historial.forEach((ev, idx) => {
+          let dotColor = 'bg-blue-600';
+          let badgeAccionBg = 'bg-blue-50 text-blue-700 border-blue-200';
+          let iconoPaso = '📄';
+
+          const dictUpper = (ev.accion || '').toUpperCase();
+          const emisorUpper = (ev.emisor || '').toUpperCase();
+          const receptorUpper = (ev.receptor || '').toUpperCase();
+
+          if (dictUpper.includes('INGRESO') || emisorUpper.includes('CONTRATISTA')) {
+            dotColor = 'bg-amber-500';
+            badgeAccionBg = 'bg-amber-50 text-amber-700 border-amber-200';
+            iconoPaso = '📥';
+          }
+          if (dictUpper.includes('TR') || receptorUpper.includes('TRANSNOA') || receptorUpper.includes('TRANSPORTISTA')) {
+            dotColor = 'bg-purple-600';
+            badgeAccionBg = 'bg-purple-50 text-purple-700 border-purple-200';
+            iconoPaso = '⚡';
+          }
+          if (dictUpper.includes('OBSERVADO')) {
+            dotColor = 'bg-rose-500';
+            badgeAccionBg = 'bg-rose-50 text-rose-700 border-rose-200';
+            iconoPaso = '⚠️';
+          }
+          if (dictUpper.includes('APTO') || dictUpper.includes('APC') || dictUpper.includes('APROBADO')) {
+            dotColor = 'bg-emerald-600';
+            badgeAccionBg = 'bg-emerald-50 text-emerald-800 border-emerald-200';
+            iconoPaso = '✅';
+          }
+
+          let linkHtml = ev.urlRemito 
+            ? `<a href="${ev.urlRemito}" target="_blank" class="inline-flex items-center gap-1 text-xs font-bold text-emerald-700 hover:text-emerald-900 underline mt-1">
+                 <span>${ev.remitoTexto || 'Ver Documento en Drive'}</span>
+                 <span>🔗</span>
+               </a>`
+            : `<span class="text-xs text-slate-600 font-semibold mt-1 block">${ev.remitoTexto || '-'}</span>`;
+
+          const itemHtml = `
+            <div class="relative group">
+              <!-- Punto en la línea de tiempo -->
+              <div class="absolute -left-[31px] md:-left-[39px] top-1.5 w-5 h-5 rounded-full ${dotColor} timeline-dot flex items-center justify-center text-[10px] text-white font-bold">
+                ${idx + 1}
+              </div>
+
+              <!-- Tarjeta de Evento -->
+              <div class="bg-slate-50 group-hover:bg-white border border-slate-200 rounded-lg p-3.5 transition-all shadow-sm">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-2">
+                  <div class="flex items-center gap-2">
+                    <span class="text-sm">${iconoPaso}</span>
+                    <span class="text-xs font-bold text-slate-800">${ev.hito || ('Paso ' + (idx + 1))}</span>
+                    <span class="text-[10px] font-semibold px-2 py-0.5 rounded border ${badgeAccionBg}">
+                      ${ev.accion}
+                    </span>
+                  </div>
+                  <div class="text-[11px] font-semibold text-slate-500">
+                    📅 ${ev.fecha}
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs border-t border-slate-200/60 pt-2 text-slate-600">
+                  <div>
+                    <span class="text-slate-400 font-medium">De:</span> <b class="text-slate-700">${ev.emisor}</b>
+                    <span class="text-slate-400 font-medium ml-1">➔ Para:</span> <b class="text-slate-700">${ev.receptor}</b>
+                  </div>
+                  <div>
+                    <span class="text-slate-400 font-medium">Revisión:</span> <b class="text-slate-800">${ev.revision || '-'}</b>
+                    <span class="text-slate-400 font-medium ml-2">Ciclo:</span> <b class="text-indigo-700">${ev.ciclo || 'Ciclo 1'}</b>
+                  </div>
+                </div>
+
+                <div class="mt-2 text-xs border-t border-slate-200/60 pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                  <div>
+                    <span class="text-slate-400 font-medium">Remito / Nota de Envío:</span>
+                    ${linkHtml}
+                  </div>
+                  ${ev.observaciones ? `<div class="text-[11px] text-slate-500 italic">“${ev.observaciones}”</div>` : ''}
+                </div>
+              </div>
+            </div>
+          `;
+          cont.insertAdjacentHTML('beforeend', itemHtml);
+        });
+      }
+    </script>
+  </body>
+</html>
