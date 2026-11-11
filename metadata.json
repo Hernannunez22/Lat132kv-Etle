@@ -1,0 +1,6 @@
+{
+  "name": "Obras 132 kV - Centro de Control e Ingeniería",
+  "description": "Sistema de control documental, ingeniería de campo, hitos contractuales, auditoría técnica e informes ejecutivos para obras de alta tensión 132 kV.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
