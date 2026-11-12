@@ -6,6 +6,7 @@ import {
   HITOS_CONTRATUALES_INICIALES_FIJOS, 
   INTERFERENCIAS_INICIALES 
 } from '../data/initialData';
+import { buscarYExtraerArticulosPliego } from '../data/pliegosContractuales';
 
 interface AppContextType {
   planos: Plano[];
@@ -38,6 +39,7 @@ interface AppContextType {
   addAudio: (audio: NotaAudio) => void;
   deleteAudio: (id: string) => void;
   sendChatMessage: (texto: string) => Promise<void>;
+  extraerDePliego: (consulta: string) => Promise<string>;
   clearChat: () => void;
   setUltimoInforme: (inf: string) => void;
 }
@@ -127,7 +129,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [chatMessages, setChatMessages] = useState<MensajeChat[]>([
     {
       id: 'init-1',
-      texto: '⚡ Asistente de Ingeniería y Auditoría (132 kV)\n\nTengo acceso al inventario de planos, cronograma de hitos, análisis de cruces y respaldo en Cloudflare R2. ¿En qué frente o especificación técnica precisas asistencia?',
+      texto: '⚡ **Asistente de Ingeniería y Auditoría (132 kV)**\n\n📖 **Pliegos Contractuales 100% Precargados y Listos:** Tengo integradas todas las especificaciones técnicas del proyecto (Línea 132 kV, ETs Leales / Villa Quinteros / El Bracho, Pliego de Bases y Condiciones Particulares, Cruces con Gasoducto TGN / DNV y Ensayos FAT/SAT).\n\n**No necesitas cargar ni adjuntar los pliegos:** solo indícame qué artículo, exigencia de hormigón, parámetro técnico, tolerancia, gálibo de cruce o penalidad contractual precisas extraer y te lo presentaré al instante.',
       esUsuario: false,
       fecha: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     }
@@ -289,7 +291,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setIsSyncing(false);
   }, [config.apiUrl, config.r2AccountId, config.r2Bucket]);
 
-  // Chat QA Logic
+  // Extracción directa de pliegos técnicos
+  const extraerDePliego = async (consulta: string): Promise<string> => {
+    try {
+      const res = await fetch('/api/pliegos/extraer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ consulta })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.exito && data.respuesta) {
+          return data.respuesta;
+        }
+      }
+    } catch (e) {
+      console.warn('Fallo en /api/pliegos/extraer, usando motor local:', e);
+    }
+    const local = buscarYExtraerArticulosPliego(consulta);
+    return local.resumenExtraccion;
+  };
+
+  // Chat QA Logic con lectura directa de pliegos y backend local / Gemini
   const sendChatMessage = async (msg: string) => {
     if (!msg.trim()) return;
 
@@ -305,15 +328,34 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const idAi = 'ai-' + Date.now();
     const loadingAi: MensajeChat = {
       id: idAi,
-      texto: 'Analizando con IA de ingeniería y auditoría...',
+      texto: 'Leyendo pliegos contractuales y analizando con IA de ingeniería...',
       esUsuario: false,
       fecha: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
     setChatMessages(prev => [...prev, loadingAi]);
 
-    // Check remote API
+    // 1. Intentar llamar al backend local /api/chat (Full-stack con Gemini y Pliegos precargados)
     let answered = false;
-    if (config.apiUrl && config.apiUrl.startsWith('http')) {
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mensaje: msg })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.exito && data.respuesta) {
+          setChatMessages(prev => prev.map(m => m.id === idAi ? { ...m, texto: data.respuesta } : m));
+          answered = true;
+          return;
+        }
+      }
+    } catch (errApi) {
+      console.warn('API local /api/chat no respondió, verificando fallback:', errApi);
+    }
+
+    // 2. Si no respondió /api/chat y está configurada una API remota externa (Google Apps Script)
+    if (!answered && config.apiUrl && config.apiUrl.startsWith('http')) {
       try {
         let url = config.apiUrl;
         if (url.includes('/edit')) url = url.replace(/\/edit.*$/, '/exec');
@@ -327,36 +369,36 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (data && data.exito && data.respuesta) {
           setChatMessages(prev => prev.map(m => m.id === idAi ? { ...m, texto: data.respuesta } : m));
           answered = true;
+          return;
         }
       } catch (e) {
-        console.warn('Remote chat error, falling back to local domain QA:', e);
+        console.warn('Remote chat error, falling back to local pliegos extraction:', e);
       }
     }
 
+    // 3. Fallback inteligente local: Extracción directa de los pliegos y análisis de obra
     if (!answered) {
       setTimeout(() => {
-        let answer = '';
         const q = msg.toLowerCase();
+        let answer = '';
 
-        if (q.includes('plano') || q.includes('cuántos') || q.includes('emitido') || q.includes('avance')) {
+        if (q.includes('plano') && (q.includes('cuántos') || q.includes('emitido') || q.includes('avance'))) {
           const emitidos = planos.length;
           const apc = planos.filter(p => p.selloApc).length;
           const pct = ((emitidos / TOTAL_PLANIFICADOS_CONTRATO_GLOBAL) * 100).toFixed(1);
-          answer = `📊 **Estado Documental al Día:**\n- **Planos Emitidos:** ${emitidos} de ${TOTAL_PLANIFICADOS_CONTRATO_GLOBAL} contractuales (${pct}% de avance global).\n- **Aprobados Sello APC:** ${apc} planos.\n- **Distribución:**\n  • LAT El Bracho - Villa Quinteros: ${planos.filter(p => p.proyecto.includes('LAT') || p.proyecto.includes('Bracho - Villa')).length} emitidos.\n  • ET Leales: ${planos.filter(p => p.proyecto.includes('Leales')).length} emitidos.\n  • ET Villa Quinteros: ${planos.filter(p => p.proyecto.includes('Quinteros')).length} emitidos.\n  • ET El Bracho: ${planos.filter(p => p.proyecto.includes('Bracho') && !p.proyecto.includes('LAT')).length} emitidos.`;
-        } else if (q.includes('hito') || q.includes('crítica') || q.includes('venc') || q.includes('ant.')) {
+          answer = `📊 **Estado Documental al Día (Base 910 Planos Contractuales):**\n- **Planos Emitidos:** ${emitidos} de ${TOTAL_PLANIFICADOS_CONTRATO_GLOBAL} contractuales (${pct}% de avance global).\n- **Aprobados Sello APC:** ${apc} planos.\n- **Distribución:**\n  • LAT El Bracho - Villa Quinteros: ${planos.filter(p => p.proyecto.includes('LAT') || p.proyecto.includes('Bracho - Villa')).length} emitidos.\n  • ET Leales: ${planos.filter(p => p.proyecto.includes('Leales')).length} emitidos.\n  • ET Villa Quinteros: ${planos.filter(p => p.proyecto.includes('Quinteros')).length} emitidos.\n  • ET El Bracho: ${planos.filter(p => p.proyecto.includes('Bracho') && !p.proyecto.includes('LAT')).length} emitidos.\n\n*Nota:* Los pliegos técnicos y bases de licitación están cargados en el sistema para consulta o extracción de artículos sin necesidad de adjuntar archivos.`;
+        } else if (q.includes('hito') && (q.includes('crítica') || q.includes('venc') || q.includes('cronograma'))) {
           const hoy = new Date();
           const vencidos = hitos.filter(h => new Date(h.fechaObjetivo + 'T00:00:00').getTime() < hoy.getTime());
-          answer = `⏳ **Auditoría de Ruta Crítica e Hitos:**\n- Total de hitos maestros: ${hitos.length}.\n- Hitos exigibles vencidos a hoy: ${vencidos.length}.\n${vencidos.map(v => `• [${v.codigo}] ${v.nombre} (Venció: ${v.fechaObjetivo})`).join('\n')}\n\n**Recomendación:** Se requiere emitir las memorias de cálculo pendientes y elevar el descargo a la Supervisión TRANSNOA para deslindar penalidades contractuales.`;
-        } else if (q.includes('cruce') || q.includes('interferencia') || q.includes('tgn') || q.includes('gasnor') || q.includes('vialidad')) {
-          answer = `🚧 **Auditoría de Cruces e Interferencias (LAT 132 kV):**\n- **TGN (Gasoducto Troncal Norte Ø 24"):** Plano L-EB-VQ-OC-PL-011 en trámite de aptitud técnica. Se requiere constancia de no afectación al sistema de protección catódica.\n- **Vialidad Nacional RN 38:** Gálibo reglamentario de 10.5 m verificado.\n- **Gasnor:** Pendiente estudio de interferencia inductiva en vanos 12 a 19.\n- **Trenes Argentinos (Belgrano Cargas):** Documentación lista para firma de convenio de cruce.`;
-        } else if (q.includes('hormig') || q.includes('h-25') || q.includes('fundacion') || q.includes('stub') || q.includes('pat')) {
-          answer = `🏗️ **Especificación Técnica y Pliego:**\n- **Hormigón H-25:** Resistencia característica f'c ≥ 250 kg/cm² a 28 días. Asentamiento de cono de Abrams entre 8 y 12 cm. Obligatorio toma de probetas (mínimo 3 por cada colada de fundación).\n- **Desencofrado:** No antes de 48 horas para laterales y 14 días para carga estructural.\n- **Malla PAT:** Resistencia de puesta a tierra exigida por TRANSNOA ≤ 10 ohms en cualquier época del año.`;
+          answer = `⏳ **Auditoría de Ruta Crítica e Hitos:**\n- Total de hitos maestros: ${hitos.length}.\n- Hitos exigibles vencidos a hoy: ${vencidos.length}.\n${vencidos.map(v => `• [${v.codigo}] ${v.nombre} (Venció: ${v.fechaObjetivo})`).join('\n')}\n\n**Exigencia del Pliego (PBCP Art. 35):** Multa de 0.1% diario por cada día de mora en hitos de la ruta crítica. Se recomienda emitir las Notas de Pedido de descargo de responsabilidades a la Supervisión TRANSNOA.`;
         } else {
-          answer = `⚡ He recibido tu consulta: "${msg}".\n\nEl sistema cuenta con ${planos.length} planos vivos registrados en el catálogo de los 4 frentes de obra y ${hitos.length} hitos contractuales sincronizados con el repositorio Cloudflare R2 (${megabytesR2}).\n\nPuedes consultar sobre planos específicos, semáforos de vencimiento, cálculos de fundaciones o generar un informe formal en 1 clic.`;
+          // Extrae directamente de los pliegos cargados
+          const extraccion = buscarYExtraerArticulosPliego(msg);
+          answer = extraccion.resumenExtraccion;
         }
 
         setChatMessages(prev => prev.map(m => m.id === idAi ? { ...m, texto: answer } : m));
-      }, 600);
+      }, 350);
     }
   };
 
@@ -364,7 +406,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setChatMessages([
       {
         id: 'init-reset',
-        texto: 'Chat reiniciado. ¿En qué frente o especificación técnica de la obra 132 kV precisas asistencia?',
+        texto: '⚡ Chat reiniciado.\n\n📖 **Pliegos cargados y lectura directa habilitada:** Puedes pedirme cualquier artículo o extracto de las especificaciones técnicas (hormigón H-25, transformadores 30 MVA, mallas PAT, cruces TGN o multas contractuales) sin necesidad de subir archivos.',
         esUsuario: false,
         fecha: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       }
@@ -403,6 +445,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       addAudio,
       deleteAudio,
       sendChatMessage,
+      extraerDePliego,
       clearChat,
       setUltimoInforme
     }}>

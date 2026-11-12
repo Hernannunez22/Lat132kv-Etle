@@ -11,6 +11,7 @@ import {
   Sparkles,
   Volume2
 } from 'lucide-react';
+import { buscarYExtraerArticulosPliego } from '../data/pliegosContractuales';
 
 interface FichaData {
   titulo: string;
@@ -158,16 +159,31 @@ export const AnotadorTab: React.FC = () => {
         ]
       });
     } else {
-      setFicha({
-        titulo: `Auditoría Técnica: "${textoQuery || consulta}"`,
-        exigenciaPliego: "Pliego de Bases y Condiciones: Los materiales, equipos y metodologías constructivas deben responder estrictamente a las Normas IRAM, AEA 95301 y Especificaciones Técnicas Particulares del Contrato de Línea 132 kV.",
-        planoApc: "Planos Aprobados APC: Cualquier desvío de traza, fundación o modelo de equipo respecto al proyecto ejecutivo sellado requiere la previa aprobación por escrito de TRANSNOA mediante Orden de Servicio.",
-        secuenciaInspeccion: [
-          "Verificar la vigencia de la última revisión emitida del plano (Rev 0 o APC).",
-          "Comprobar certificados de calidad de fábrica (ensayos de recepción y protocolos de lote).",
-          "Asentar en el Libro de Comunicaciones de Obra el inicio de los trabajos y solicitud de inspección."
-        ]
-      });
+      const extraccion = buscarYExtraerArticulosPliego(q);
+      if (extraccion.articulosCoincidentes.length > 0) {
+        const art = extraccion.articulosCoincidentes[0];
+        setFicha({
+          titulo: `${art.pliegoCodigo} - ${art.articulo}: ${art.titulo}`,
+          exigenciaPliego: `${art.pliegoNombre} (${art.seccion}): ${art.contenido}`,
+          planoApc: `Planos y Normativa Asociada: ${art.planosRelacionados.join(", ")} | Tolerancias: ${art.tolerancias || 'Conforme a pliego'} | Norma: ${art.normativaReferencia}`,
+          secuenciaInspeccion: [
+            `Verificar cumplimiento del artículo contractual: ${art.articulo} (${art.pliegoCodigo}).`,
+            ...Object.entries(art.parametrosClave).map(([k, v]) => `Control de parámetro garantizado: ${k} = ${v}`),
+            `Comprobar que los protocolos de ensayo y planos de obra cuenten con el sello APC (Aprobado para Construcción).`
+          ]
+        });
+      } else {
+        setFicha({
+          titulo: `Auditoría Técnica: "${textoQuery || consulta}"`,
+          exigenciaPliego: "Pliego de Bases y Condiciones: Los materiales, equipos y metodologías constructivas deben responder estrictamente a las Normas IRAM, AEA 95301 y Especificaciones Técnicas Particulares del Contrato de Línea 132 kV.",
+          planoApc: "Planos Aprobados APC: Cualquier desvío de traza, fundación o modelo de equipo respecto al proyecto ejecutivo sellado requiere la previa aprobación por escrito de TRANSNOA mediante Orden de Servicio.",
+          secuenciaInspeccion: [
+            "Verificar la vigencia de la última revisión emitida del plano (Rev 0 o APC).",
+            "Comprobar certificados de calidad de fábrica (ensayos de recepción y protocolos de lote).",
+            "Asentar en el Libro de Comunicaciones de Obra el inicio de los trabajos y solicitud de inspección."
+          ]
+        });
+      }
     }
   };
 
