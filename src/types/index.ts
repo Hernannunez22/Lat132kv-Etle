@@ -72,9 +72,42 @@ export interface AppConfig {
   r2Bucket: string;
 }
 
+export interface PliegoReal {
+  id: string;
+  nombre: string;
+  tipoMime: string;
+  tamanioBytes: number;
+  tamanioTexto: string;
+  fechaSubida: string;
+  contenidoTexto?: string;
+  dataBase64?: string;
+  resumen?: string;
+  paginas?: number;
+  caracteresTexto?: number;
+  esEscaneado?: boolean;
+  tiempoProcesoMs?: number;
+}
+
+export interface PlanoComparacionDoc {
+  id: string;
+  rol: 'A' | 'B';
+  nombre: string;
+  tipoMime: string;
+  tamanioBytes: number;
+  tamanioTexto: string;
+  fechaSubida: string;
+  paginas: number;
+  caracteresTexto: number;
+  esEscaneado: boolean;
+  tiempoProcesoMs: number;
+  contenidoTexto?: string;
+  metricasDetectadas?: string[];
+}
+
 export type TabType = 
   | 'dashboard' 
   | 'planos' 
+  | 'comparador'
   | 'hitos' 
   | 'informes' 
   | 'interferencias' 

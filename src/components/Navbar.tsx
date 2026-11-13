@@ -1,21 +1,32 @@
 import React from 'react';
 import { useApp } from '../context/AppContext';
 import { TabType } from '../types';
+import {
+  BarChart3,
+  FolderOpen,
+  FileDiff,
+  Clock,
+  FileText,
+  Construction,
+  NotebookPen,
+  MessageSquare,
+} from 'lucide-react';
 
 interface NavItem {
   id: TabType;
   label: string;
-  icon: string;
+  Icon: React.ComponentType<{ className?: string }>;
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: 'dashboard', label: 'Obras', icon: '📊' },
-  { id: 'planos', label: 'Planos', icon: '📁' },
-  { id: 'hitos', label: 'Hitos', icon: '⏳' },
-  { id: 'informes', label: 'Informes', icon: '📄' },
-  { id: 'interferencias', label: 'Cruces', icon: '🚧' },
-  { id: 'anotador', label: 'Anotador', icon: '📓' },
-  { id: 'chat', label: 'Chat IA', icon: '💬' },
+  { id: 'dashboard', label: 'Obras', Icon: BarChart3 },
+  { id: 'planos', label: 'Planos', Icon: FolderOpen },
+  { id: 'comparador', label: 'Comparar', Icon: FileDiff },
+  { id: 'hitos', label: 'Hitos', Icon: Clock },
+  { id: 'informes', label: 'Informes', Icon: FileText },
+  { id: 'interferencias', label: 'Cruces', Icon: Construction },
+  { id: 'anotador', label: 'Anotador', Icon: NotebookPen },
+  { id: 'chat', label: 'Chat IA', Icon: MessageSquare },
 ];
 
 export const Navbar: React.FC = () => {
@@ -23,23 +34,24 @@ export const Navbar: React.FC = () => {
 
   return (
     <nav className="fixed bottom-0 left-0 right-0 h-16 bg-[#0f172a]/95 border-t border-slate-800/90 flex items-center justify-around px-1 z-40 backdrop-blur-2xl">
-      {NAV_ITEMS.map(item => {
-        const isActive = activeTab === item.id;
+      {NAV_ITEMS.map(({ id, label, Icon }) => {
+        const isActive = activeTab === id;
         return (
           <button
-            key={item.id}
-            onClick={() => setActiveTab(item.id)}
-            className={`flex flex-col items-center justify-center w-12 py-1 transition-all cursor-pointer ${
-              isActive 
-                ? 'text-sky-400 font-bold scale-105' 
+            key={id}
+            onClick={() => setActiveTab(id)}
+            className={`flex flex-col items-center justify-center min-w-[40px] px-1 py-1 transition-all cursor-pointer ${
+              isActive
+                ? 'text-sky-400 font-bold scale-105'
                 : 'text-slate-400 hover:text-slate-200 font-medium'
             }`}
           >
-            <span className="text-base mb-0.5">{item.icon}</span>
-            <span className="text-[9px]">{item.label}</span>
+            <Icon className="w-4 h-4 mb-1" />
+            <span className="text-[9px] leading-none">{label}</span>
           </button>
         );
       })}
     </nav>
   );
 };
+

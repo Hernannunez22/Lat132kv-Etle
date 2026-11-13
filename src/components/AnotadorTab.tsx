@@ -11,7 +11,7 @@ import {
   Sparkles,
   Volume2
 } from 'lucide-react';
-import { buscarYExtraerArticulosPliego } from '../data/pliegosContractuales';
+import { buscarYExtraerDePliegosReales } from '../data/pliegosContractuales';
 
 interface FichaData {
   titulo: string;
@@ -29,7 +29,8 @@ export const AnotadorTab: React.FC = () => {
     deleteFoto, 
     audiosCampo, 
     addAudio, 
-    deleteAudio 
+    deleteAudio,
+    pliegosReales 
   } = useApp();
 
   const [consulta, setConsulta] = useState('');
@@ -159,23 +160,25 @@ export const AnotadorTab: React.FC = () => {
         ]
       });
     } else {
-      const extraccion = buscarYExtraerArticulosPliego(q);
-      if (extraccion.articulosCoincidentes.length > 0) {
-        const art = extraccion.articulosCoincidentes[0];
+      const extraccion = buscarYExtraerDePliegosReales(q, pliegosReales);
+      if (extraccion.coincidencias.length > 0) {
+        const c = extraccion.coincidencias[0];
         setFicha({
-          titulo: `${art.pliegoCodigo} - ${art.articulo}: ${art.titulo}`,
-          exigenciaPliego: `${art.pliegoNombre} (${art.seccion}): ${art.contenido}`,
-          planoApc: `Planos y Normativa Asociada: ${art.planosRelacionados.join(", ")} | Tolerancias: ${art.tolerancias || 'Conforme a pliego'} | Norma: ${art.normativaReferencia}`,
+          titulo: `Pliego Real: ${c.pliegoNombre}`,
+          exigenciaPliego: c.fragmento,
+          planoApc: "Verificado contra documento de pliego real cargado en el sistema.",
           secuenciaInspeccion: [
-            `Verificar cumplimiento del artículo contractual: ${art.articulo} (${art.pliegoCodigo}).`,
-            ...Object.entries(art.parametrosClave).map(([k, v]) => `Control de parámetro garantizado: ${k} = ${v}`),
-            `Comprobar que los protocolos de ensayo y planos de obra cuenten con el sello APC (Aprobado para Construcción).`
+            `Verificar cumplimiento del requerimiento extraído del pliego real.`,
+            `Cotejar con el plano emitido con sello APC (Aprobado para Construcción).`,
+            `Registrar protocolo de inspección en el Libro de Comunicaciones de Obra.`
           ]
         });
       } else {
         setFicha({
           titulo: `Auditoría Técnica: "${textoQuery || consulta}"`,
-          exigenciaPliego: "Pliego de Bases y Condiciones: Los materiales, equipos y metodologías constructivas deben responder estrictamente a las Normas IRAM, AEA 95301 y Especificaciones Técnicas Particulares del Contrato de Línea 132 kV.",
+          exigenciaPliego: pliegosReales.length > 0 
+            ? "No se hallaron coincidencias directas para esta consulta en tus pliegos reales cargados." 
+            : "No hay pliegos reales cargados. Sube tus documentos con el botón 'Pliegos Reales' en la cabecera.",
           planoApc: "Planos Aprobados APC: Cualquier desvío de traza, fundación o modelo de equipo respecto al proyecto ejecutivo sellado requiere la previa aprobación por escrito de TRANSNOA mediante Orden de Servicio.",
           secuenciaInspeccion: [
             "Verificar la vigencia de la última revisión emitida del plano (Rev 0 o APC).",

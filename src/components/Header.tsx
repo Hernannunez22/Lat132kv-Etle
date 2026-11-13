@@ -1,6 +1,6 @@
 import React from 'react';
 import { useApp } from '../context/AppContext';
-import { FileText, Clock, Settings, RefreshCw } from 'lucide-react';
+import { FileText, Clock, Settings, RefreshCw, BookOpen } from 'lucide-react';
 
 export const Header: React.FC = () => {
   const { 
@@ -9,7 +9,9 @@ export const Header: React.FC = () => {
     connectionStatus, 
     isSyncing, 
     sincronizarDatos, 
-    setIsSettingsOpen 
+    setIsSettingsOpen,
+    pliegosReales,
+    setIsPliegosModalOpen
   } = useApp();
 
   const getSubtitle = () => {
@@ -44,6 +46,23 @@ export const Header: React.FC = () => {
       </div>
 
       <div className="flex items-center gap-2">
+        <button 
+          onClick={() => setIsPliegosModalOpen(true)} 
+          className="px-3 py-1.5 rounded-xl bg-sky-950/80 hover:bg-sky-900 border border-sky-800 text-sky-300 text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
+          title="Cargar y Gestionar Pliegos Reales (PDF / Word / Texto)">
+          <BookOpen className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">Pliegos Reales</span>
+          {pliegosReales.length > 0 ? (
+            <span className="px-1.5 py-0.2 rounded-full bg-sky-500 text-white text-[10px] font-bold">
+              {pliegosReales.length}
+            </span>
+          ) : (
+            <span className="px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-semibold border border-amber-500/40">
+              Cargar
+            </span>
+          )}
+        </button>
+
         <button 
           onClick={() => setActiveTab('informes')} 
           className="px-3 py-1.5 rounded-xl bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-800 text-emerald-300 text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer">

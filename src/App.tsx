@@ -4,6 +4,7 @@ import { Header } from './components/Header';
 import { Navbar } from './components/Navbar';
 import { DashboardTab } from './components/DashboardTab';
 import { PlanosTab } from './components/PlanosTab';
+import { ComparadorTab } from './components/ComparadorTab';
 import { HitosTab } from './components/HitosTab';
 import { InformesTab } from './components/InformesTab';
 import { InterferenciasTab } from './components/InterferenciasTab';
@@ -11,6 +12,7 @@ import { AnotadorTab } from './components/AnotadorTab';
 import { ChatTab } from './components/ChatTab';
 import { ModalConfiguracion } from './components/ModalConfiguracion';
 import { ModalEditorHitos } from './components/ModalEditorHitos';
+import { ModalCargarPliegos } from './components/ModalCargarPliegos';
 
 const MainContent: React.FC = () => {
   const { activeTab } = useApp();
@@ -20,6 +22,7 @@ const MainContent: React.FC = () => {
       <div className="max-w-6xl mx-auto p-4 lg:p-6">
         {activeTab === 'dashboard' && <DashboardTab />}
         {activeTab === 'planos' && <PlanosTab />}
+        {activeTab === 'comparador' && <ComparadorTab />}
         {activeTab === 'hitos' && <HitosTab />}
         {activeTab === 'informes' && <InformesTab />}
         {activeTab === 'interferencias' && <InterferenciasTab />}
@@ -30,6 +33,21 @@ const MainContent: React.FC = () => {
   );
 };
 
+const ModalsContainer: React.FC = () => {
+  const { isPliegosModalOpen, setIsPliegosModalOpen } = useApp();
+
+  return (
+    <>
+      <ModalConfiguracion />
+      <ModalEditorHitos />
+      <ModalCargarPliegos 
+        isOpen={isPliegosModalOpen} 
+        onClose={() => setIsPliegosModalOpen(false)} 
+      />
+    </>
+  );
+};
+
 export default function App() {
   return (
     <AppProvider>
@@ -37,8 +55,7 @@ export default function App() {
         <Header />
         <MainContent />
         <Navbar />
-        <ModalConfiguracion />
-        <ModalEditorHitos />
+        <ModalsContainer />
       </div>
     </AppProvider>
   );
