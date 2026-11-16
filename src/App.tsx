@@ -6,6 +6,7 @@ import { DashboardTab } from './components/DashboardTab';
 import { PlanosTab } from './components/PlanosTab';
 import { ComparadorTab } from './components/ComparadorTab';
 import { HitosTab } from './components/HitosTab';
+import { MinutasTab } from './components/MinutasTab';
 import { InformesTab } from './components/InformesTab';
 import { InterferenciasTab } from './components/InterferenciasTab';
 import { AnotadorTab } from './components/AnotadorTab';
@@ -13,6 +14,7 @@ import { ChatTab } from './components/ChatTab';
 import { ModalConfiguracion } from './components/ModalConfiguracion';
 import { ModalEditorHitos } from './components/ModalEditorHitos';
 import { ModalCargarPliegos } from './components/ModalCargarPliegos';
+import { OfflineIndicator } from './components/OfflineIndicator';
 
 const MainContent: React.FC = () => {
   const { activeTab } = useApp();
@@ -24,6 +26,7 @@ const MainContent: React.FC = () => {
         {activeTab === 'planos' && <PlanosTab />}
         {activeTab === 'comparador' && <ComparadorTab />}
         {activeTab === 'hitos' && <HitosTab />}
+        {activeTab === 'minutas' && <MinutasTab />}
         {activeTab === 'informes' && <InformesTab />}
         {activeTab === 'interferencias' && <InterferenciasTab />}
         {activeTab === 'anotador' && <AnotadorTab />}
@@ -56,6 +59,7 @@ export default function App() {
         <MainContent />
         <Navbar />
         <ModalsContainer />
+        <OfflineIndicator />
       </div>
     </AppProvider>
   );

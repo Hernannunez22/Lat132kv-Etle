@@ -1,6 +1,7 @@
 import React from 'react';
 import { useApp } from '../context/AppContext';
 import { FileText, Clock, Settings, RefreshCw, BookOpen } from 'lucide-react';
+import { PWAInstallButton } from './PWAInstallButton';
 
 export const Header: React.FC = () => {
   const { 
@@ -18,7 +19,9 @@ export const Header: React.FC = () => {
     switch (activeTab) {
       case 'dashboard': return 'Control Documental & Ingeniería de Campo';
       case 'planos': return 'Explorador de Planos y Respaldo R2';
+      case 'comparador': return 'Comparador de Planos PDF y Auditoría vs. Pliego';
       case 'hitos': return 'Cronograma de Hitos & Alerta de Vencimientos';
+      case 'minutas': return 'Minutas de Reunión, Compromisos y Notas de Pedido';
       case 'informes': return 'Generador de Informes Ejecutivos en 1 Clic';
       case 'interferencias': return 'Auditoría de Cruces & Entes (LAT 132 kV)';
       case 'anotador': return 'Anotador Técnico & Auditoría';
@@ -76,6 +79,8 @@ export const Header: React.FC = () => {
           <Clock className="w-3.5 h-3.5" />
           <span className="hidden sm:inline">Hitos</span>
         </button>
+
+        <PWAInstallButton />
 
         <button 
           onClick={() => setIsSettingsOpen(true)} 

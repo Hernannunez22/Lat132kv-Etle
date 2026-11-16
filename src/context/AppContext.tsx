@@ -1,5 +1,21 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
-import { Plano, Hito, Interferencia, AppConfig, TabType, NotaAudio, FotoCampo, MensajeChat, PliegoReal, PlanoComparacionDoc } from '../types';
+import {
+  Plano,
+  Hito,
+  Interferencia,
+  AppConfig,
+  TabType,
+  NotaAudio,
+  FotoCampo,
+  MensajeChat,
+  PliegoReal,
+  PlanoComparacionDoc,
+  ChatAdjuntoPdf,
+  MinutaReunion,
+  CompromisoMinuta,
+  NotaPedidoIngenieria,
+  EstadoCompromiso,
+} from '../types';
 import { 
   TOTAL_PLANIFICADOS_CONTRATO_GLOBAL, 
   PLANOS_INICIALES_FIJOS, 
@@ -27,6 +43,10 @@ interface AppContextType {
   pliegosReales: PliegoReal[];
   planoCompararA: PlanoComparacionDoc | null;
   planoCompararB: PlanoComparacionDoc | null;
+  chatAdjuntos: ChatAdjuntoPdf[];
+  minutas: MinutaReunion[];
+  compromisosMinutas: CompromisoMinuta[];
+  notasPedido: NotaPedidoIngenieria[];
   config: AppConfig;
   connectionStatus: string;
   megabytesR2: string;
@@ -57,9 +77,82 @@ interface AppContextType {
     onProgress?: (info: SubidaProgresoInfo) => void
   ) => Promise<PlanoComparacionDoc>;
   eliminarPlanoComparador: (rol: 'A' | 'B') => Promise<void>;
+  subirAdjuntoChat: (
+    file: File,
+    onProgress?: (info: SubidaProgresoInfo) => void
+  ) => Promise<ChatAdjuntoPdf>;
+  eliminarAdjuntoChat: (id: string) => Promise<void>;
+  limpiarAdjuntosChat: () => Promise<void>;
   agregarPliegoReal: (pliego: PliegoReal) => Promise<void>;
   eliminarPliegoReal: (id: string) => Promise<void>;
   limpiarTodosPliegosReales: () => Promise<void>;
+  sincronizarMinutasDrive: (params: {
+    accessToken: string;
+    folderId?: string;
+    buscarEnTodoDrive?: boolean;
+  }) => Promise<{
+    carpetaRaizNombre: string;
+    carpetasEscaneadas: number;
+    archivosDetectados: number;
+    minutasNuevas: MinutaReunion[];
+    minutasActualizadas: number;
+    minutasOmitidasPorExistentes: number;
+    compromisosNuevos: CompromisoMinuta[];
+    erroresArchivos: Array<{ nombre: string; error: string }>;
+  }>;
+  subirMinutaArchivo: (
+    file: File,
+    meta?: { codigo?: string; titulo?: string; fechaReunion?: string; frente?: string; participantes?: string }
+  ) => Promise<{ minuta: MinutaReunion; compromisosExtraidos: CompromisoMinuta[]; fuenteExtraccion: string }>;
+  registrarMinutaTexto: (payload: {
+    codigo?: string;
+    titulo?: string;
+    fechaReunion?: string;
+    frente?: string;
+    participantes?: string;
+    contenidoTexto?: string;
+    compromisosManuales?: Array<{
+      descripcion: string;
+      responsable?: string;
+      area?: string;
+      frente?: string;
+      fechaLimite?: string;
+      estado?: EstadoCompromiso;
+      documentosRelacionados?: string[];
+    }>;
+    extraerAutomaticamente?: boolean;
+  }) => Promise<{ minuta: MinutaReunion; compromisosExtraidos: CompromisoMinuta[]; fuenteExtraccion: string }>;
+  eliminarMinuta: (id: string) => Promise<void>;
+  agregarCompromisoMinuta: (payload: {
+    minutaId?: string;
+    minutaCodigo?: string;
+    minutaFecha?: string;
+    descripcion: string;
+    responsable?: string;
+    area?: string;
+    frente?: string;
+    fechaLimite?: string;
+    estado?: EstadoCompromiso;
+    observaciones?: string;
+    documentosRelacionados?: string[];
+  }) => Promise<CompromisoMinuta>;
+  actualizarCompromisoMinuta: (
+    id: string,
+    cambios: Partial<Pick<CompromisoMinuta, 'estado' | 'responsable' | 'fechaLimite' | 'descripcion' | 'observaciones' | 'frente'>>
+  ) => Promise<void>;
+  eliminarCompromisoMinuta: (id: string) => Promise<void>;
+  generarNotaPedido: (payload: {
+    compromisoIds: string[];
+    numeroNota?: string;
+    fechaEmision?: string;
+    emisor?: string;
+    destinatario?: string;
+    frente?: string;
+    asunto?: string;
+    plazoDescargoDias?: number;
+    encuadreAdicional?: string;
+  }) => Promise<NotaPedidoIngenieria>;
+  eliminarNotaPedido: (id: string) => Promise<void>;
   updateConfig: (cfg: AppConfig) => void;
   sincronizarDatos: () => Promise<void>;
   saveHitos: (nuevosHitos: Hito[]) => Promise<void>;
@@ -110,6 +203,40 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const [planoCompararA, setPlanoCompararA] = useState<PlanoComparacionDoc | null>(null);
   const [planoCompararB, setPlanoCompararB] = useState<PlanoComparacionDoc | null>(null);
+  const [chatAdjuntos, setChatAdjuntos] = useState<ChatAdjuntoPdf[]>([]);
+
+  const [minutas, setMinutas] = useState<MinutaReunion[]>(() => {
+    try {
+      const saved = localStorage.getItem('cache_minutas_132kv');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {}
+    return [];
+  });
+
+  const [compromisosMinutas, setCompromisosMinutas] = useState<CompromisoMinuta[]>(() => {
+    try {
+      const saved = localStorage.getItem('cache_compromisos_minutas_132kv');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {}
+    return [];
+  });
+
+  const [notasPedido, setNotasPedido] = useState<NotaPedidoIngenieria[]>(() => {
+    try {
+      const saved = localStorage.getItem('cache_notas_pedido_132kv');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {}
+    return [];
+  });
 
   // Data
   const [planos, setPlanos] = useState<Plano[]>(() => {
@@ -210,8 +337,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       fechaSubida: string,
       blob: Blob,
       onProgress?: (info: SubidaProgresoInfo) => void,
-      destino: 'pliego' | 'planoA' | 'planoB' = 'pliego'
-    ): Promise<{ pliego?: PliegoReal; plano?: PlanoComparacionDoc }> => {
+      destino: 'pliego' | 'planoA' | 'planoB' | 'chatPdf' = 'pliego'
+    ): Promise<{ pliego?: PliegoReal; plano?: PlanoComparacionDoc; adjuntoChat?: ChatAdjuntoPdf }> => {
       const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB por parte (seguro bajo el límite de 32 MB de Cloud Run)
       const totalBytes = blob.size;
       const totalMB = (totalBytes / (1024 * 1024)).toFixed(1);
@@ -311,6 +438,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           detalle: stData.detalle || 'Extrayendo texto e indexando...',
         });
         if (stData.estado === 'completado') {
+          if (stData.adjuntoChat) return { adjuntoChat: stData.adjuntoChat as ChatAdjuntoPdf };
           if (stData.plano) return { plano: stData.plano as PlanoComparacionDoc };
           if (stData.pliego) return { pliego: stData.pliego as PliegoReal };
         }
@@ -391,14 +519,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return false;
   }, [enviarArchivoPorPartes]);
 
-  // Al iniciar, sincronizar pliegos y planos comparador con el servidor (o restaurar desde IDB)
+  const persistirMinutasLocal = (
+    m: MinutaReunion[],
+    c: CompromisoMinuta[],
+    np: NotaPedidoIngenieria[]
+  ) => {
+    try {
+      localStorage.setItem('cache_minutas_132kv', JSON.stringify(m));
+      localStorage.setItem('cache_compromisos_minutas_132kv', JSON.stringify(c));
+      localStorage.setItem('cache_notas_pedido_132kv', JSON.stringify(np));
+    } catch {}
+  };
+
+  // Al iniciar, sincronizar pliegos, planos comparador y minutas con el servidor
   useEffect(() => {
     let cancelado = false;
     (async () => {
       try {
-        const [resPliegos, resPlanos] = await Promise.all([
+        const [resPliegos, resPlanos, resMinutas, resChatAdj] = await Promise.all([
           fetch('/api/pliegos'),
           fetch('/api/comparador/planos'),
+          fetch('/api/minutas'),
+          fetch('/api/chat/adjuntos'),
         ]);
         if (cancelado) return;
         if (resPliegos.ok) {
@@ -414,6 +556,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           const cmpData = await resPlanos.json();
           if (cmpData?.planoA) setPlanoCompararA(cmpData.planoA);
           if (cmpData?.planoB) setPlanoCompararB(cmpData.planoB);
+        }
+        if (resMinutas.ok && !cancelado) {
+          const minData = await resMinutas.json();
+          if (minData?.exito) {
+            const mList = Array.isArray(minData.minutas) ? minData.minutas : [];
+            const cList = Array.isArray(minData.compromisos) ? minData.compromisos : [];
+            const npList = Array.isArray(minData.notasPedido) ? minData.notasPedido : [];
+            setMinutas(mList);
+            setCompromisosMinutas(cList);
+            setNotasPedido(npList);
+            persistirMinutasLocal(mList, cList, npList);
+          }
+        }
+        if (resChatAdj.ok && !cancelado) {
+          const adjData = await resChatAdj.json();
+          if (Array.isArray(adjData?.adjuntos)) {
+            setChatAdjuntos(adjData.adjuntos);
+          }
         }
       } catch {
         // Ignorar si servidor aún está iniciando
@@ -597,6 +757,92 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
+  const subirAdjuntoChat = async (
+    file: File,
+    onProgress?: (info: SubidaProgresoInfo) => void
+  ): Promise<ChatAdjuntoPdf> => {
+    const id = `chatpdf_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const fechaSubida = new Date().toLocaleDateString('es-AR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    const tipoMime = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
+
+    let adjunto: ChatAdjuntoPdf;
+
+    if (file.size <= 3.5 * 1024 * 1024) {
+      onProgress?.({
+        fase: 'subiendo',
+        porcentaje: 55,
+        detalle: `Adjuntando e indexando "${file.name}"...`,
+      });
+      const res = await fetch('/api/pliegos/subir', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'x-pliego-id': id,
+          'x-upload-destino': 'chatPdf',
+          'x-pliego-nombre': encodeURIComponent(file.name),
+          'x-pliego-mime': tipoMime,
+          'x-pliego-fecha': encodeURIComponent(fechaSubida),
+        },
+        body: file,
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData?.error || `Error adjuntando "${file.name}" (HTTP ${res.status})`);
+      }
+      const data = await res.json();
+      if (!data?.adjuntoChat) {
+        throw new Error('No se recibió el PDF adjunto indexado del servidor.');
+      }
+      adjunto = data.adjuntoChat as ChatAdjuntoPdf;
+      onProgress?.({
+        fase: 'procesando',
+        porcentaje: 100,
+        detalle: `Listo (${adjunto.paginas} pág.)`,
+      });
+    } else {
+      const resPart = await enviarArchivoPorPartes(
+        id,
+        file.name,
+        tipoMime,
+        fechaSubida,
+        file,
+        onProgress,
+        'chatPdf'
+      );
+      if (!resPart.adjuntoChat) {
+        throw new Error('No se recibió el PDF adjunto procesado.');
+      }
+      adjunto = resPart.adjuntoChat;
+    }
+
+    setChatAdjuntos(prev => [adjunto, ...prev.filter(a => a.id !== adjunto.id)]);
+    return adjunto;
+  };
+
+  const eliminarAdjuntoChat = async (id: string) => {
+    setChatAdjuntos(prev => prev.filter(a => a.id !== id));
+    try {
+      await fetch(`/api/chat/adjuntos/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    } catch (err) {
+      console.warn('Error eliminando adjunto de chat:', err);
+    }
+  };
+
+  const limpiarAdjuntosChat = async () => {
+    setChatAdjuntos([]);
+    try {
+      await fetch('/api/chat/adjuntos/limpiar', { method: 'POST' });
+    } catch (err) {
+      console.warn('Error limpiando adjuntos de chat:', err);
+    }
+  };
+
   const agregarPliegoReal = async (pliego: PliegoReal) => {
     let pliegoFinal = pliego;
     try {
@@ -652,6 +898,229 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } catch (err) {
       console.warn('Fallo al limpiar pliegos en servidor:', err);
     }
+  };
+
+  // Acciones de Minutas, Compromisos y Notas de Pedido
+  const sincronizarMinutasDrive = async (params: {
+    accessToken: string;
+    folderId?: string;
+    buscarEnTodoDrive?: boolean;
+  }) => {
+    const res = await fetch('/api/minutas/sincronizar-drive', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.accessToken}`,
+      },
+      body: JSON.stringify({
+        folderId: params.folderId,
+        buscarEnTodoDrive: params.buscarEnTodoDrive ?? true,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.exito) {
+      throw new Error(data?.error || `Error sincronizando minutas desde Drive (HTTP ${res.status})`);
+    }
+    const mList = Array.isArray(data.minutas) ? (data.minutas as MinutaReunion[]) : minutas;
+    const cList = Array.isArray(data.compromisos)
+      ? (data.compromisos as CompromisoMinuta[])
+      : compromisosMinutas;
+    const npList = Array.isArray(data.notasPedido)
+      ? (data.notasPedido as NotaPedidoIngenieria[])
+      : notasPedido;
+    setMinutas(mList);
+    setCompromisosMinutas(cList);
+    setNotasPedido(npList);
+    persistirMinutasLocal(mList, cList, npList);
+
+    return {
+      carpetaRaizNombre: String(data.carpetaRaizNombre || 'Google Drive'),
+      carpetasEscaneadas: Number(data.carpetasEscaneadas || 0),
+      archivosDetectados: Number(data.archivosDetectados || 0),
+      minutasNuevas: Array.isArray(data.minutasNuevas) ? (data.minutasNuevas as MinutaReunion[]) : [],
+      minutasActualizadas: Number(data.minutasActualizadas || 0),
+      minutasOmitidasPorExistentes: Number(data.minutasOmitidasPorExistentes || 0),
+      compromisosNuevos: Array.isArray(data.compromisosNuevos)
+        ? (data.compromisosNuevos as CompromisoMinuta[])
+        : [],
+      erroresArchivos: Array.isArray(data.erroresArchivos) ? data.erroresArchivos : [],
+    };
+  };
+
+  const subirMinutaArchivo = async (
+    file: File,
+    meta?: { codigo?: string; titulo?: string; fechaReunion?: string; frente?: string; participantes?: string }
+  ) => {
+    const res = await fetch('/api/minutas/subir', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'x-minuta-nombre': encodeURIComponent(file.name),
+        'x-minuta-mime': file.type || 'application/pdf',
+        'x-minuta-codigo': encodeURIComponent(meta?.codigo || ''),
+        'x-minuta-titulo': encodeURIComponent(meta?.titulo || ''),
+        'x-minuta-fecha': encodeURIComponent(meta?.fechaReunion || ''),
+        'x-minuta-frente': encodeURIComponent(meta?.frente || ''),
+        'x-minuta-participantes': encodeURIComponent(meta?.participantes || ''),
+      },
+      body: file,
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.exito) {
+      throw new Error(data?.error || `No se pudo procesar la minuta (HTTP ${res.status})`);
+    }
+    const nuevasMinutas = [data.minuta as MinutaReunion, ...minutas];
+    const nuevosComp = [...(data.compromisosExtraidos as CompromisoMinuta[]), ...compromisosMinutas];
+    setMinutas(nuevasMinutas);
+    setCompromisosMinutas(nuevosComp);
+    persistirMinutasLocal(nuevasMinutas, nuevosComp, notasPedido);
+    return {
+      minuta: data.minuta as MinutaReunion,
+      compromisosExtraidos: data.compromisosExtraidos as CompromisoMinuta[],
+      fuenteExtraccion: String(data.fuenteExtraccion || 'extractor-local'),
+    };
+  };
+
+  const registrarMinutaTexto = async (payload: {
+    codigo?: string;
+    titulo?: string;
+    fechaReunion?: string;
+    frente?: string;
+    participantes?: string;
+    contenidoTexto?: string;
+    compromisosManuales?: Array<{
+      descripcion: string;
+      responsable?: string;
+      area?: string;
+      frente?: string;
+      fechaLimite?: string;
+      estado?: EstadoCompromiso;
+      documentosRelacionados?: string[];
+    }>;
+    extraerAutomaticamente?: boolean;
+  }) => {
+    const res = await fetch('/api/minutas/registrar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.exito) {
+      throw new Error(data?.error || `Error registrando minuta (HTTP ${res.status})`);
+    }
+    const nuevasMinutas = [data.minuta as MinutaReunion, ...minutas];
+    const nuevosComp = [...(data.compromisosExtraidos as CompromisoMinuta[]), ...compromisosMinutas];
+    setMinutas(nuevasMinutas);
+    setCompromisosMinutas(nuevosComp);
+    persistirMinutasLocal(nuevasMinutas, nuevosComp, notasPedido);
+    return {
+      minuta: data.minuta as MinutaReunion,
+      compromisosExtraidos: data.compromisosExtraidos as CompromisoMinuta[],
+      fuenteExtraccion: String(data.fuenteExtraccion || 'manual'),
+    };
+  };
+
+  const eliminarMinuta = async (id: string) => {
+    const res = await fetch(`/api/minutas/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('No se pudo eliminar la minuta');
+    const nuevasMinutas = minutas.filter(m => m.id !== id);
+    const nuevosComp = compromisosMinutas.filter(c => c.minutaId !== id);
+    setMinutas(nuevasMinutas);
+    setCompromisosMinutas(nuevosComp);
+    persistirMinutasLocal(nuevasMinutas, nuevosComp, notasPedido);
+  };
+
+  const agregarCompromisoMinuta = async (payload: {
+    minutaId?: string;
+    minutaCodigo?: string;
+    minutaFecha?: string;
+    descripcion: string;
+    responsable?: string;
+    area?: string;
+    frente?: string;
+    fechaLimite?: string;
+    estado?: EstadoCompromiso;
+    observaciones?: string;
+    documentosRelacionados?: string[];
+  }): Promise<CompromisoMinuta> => {
+    const res = await fetch('/api/minutas/compromisos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.exito) {
+      throw new Error(data?.error || 'Error creando compromiso');
+    }
+    const nuevosComp = [data.compromiso as CompromisoMinuta, ...compromisosMinutas];
+    setCompromisosMinutas(nuevosComp);
+    persistirMinutasLocal(minutas, nuevosComp, notasPedido);
+    return data.compromiso as CompromisoMinuta;
+  };
+
+  const actualizarCompromisoMinuta = async (
+    id: string,
+    cambios: Partial<Pick<CompromisoMinuta, 'estado' | 'responsable' | 'fechaLimite' | 'descripcion' | 'observaciones' | 'frente'>>
+  ) => {
+    const res = await fetch(`/api/minutas/compromisos/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cambios),
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.exito) {
+      throw new Error(data?.error || 'No se pudo actualizar el compromiso');
+    }
+    const nuevosComp = compromisosMinutas.map(c => (c.id === id ? (data.compromiso as CompromisoMinuta) : c));
+    setCompromisosMinutas(nuevosComp);
+    persistirMinutasLocal(minutas, nuevosComp, notasPedido);
+  };
+
+  const eliminarCompromisoMinuta = async (id: string) => {
+    const res = await fetch(`/api/minutas/compromisos/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('No se pudo eliminar el compromiso');
+    const nuevosComp = compromisosMinutas.filter(c => c.id !== id);
+    setCompromisosMinutas(nuevosComp);
+    persistirMinutasLocal(minutas, nuevosComp, notasPedido);
+  };
+
+  const generarNotaPedido = async (payload: {
+    compromisoIds: string[];
+    numeroNota?: string;
+    fechaEmision?: string;
+    emisor?: string;
+    destinatario?: string;
+    frente?: string;
+    asunto?: string;
+    plazoDescargoDias?: number;
+    encuadreAdicional?: string;
+  }): Promise<NotaPedidoIngenieria> => {
+    const res = await fetch('/api/minutas/nota-pedido/generar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.exito) {
+      throw new Error(data?.error || `Error generando Nota de Pedido (HTTP ${res.status})`);
+    }
+    const nota = data.notaPedido as NotaPedidoIngenieria;
+    const compActualizados = Array.isArray(data.compromisosActualizados)
+      ? (data.compromisosActualizados as CompromisoMinuta[])
+      : compromisosMinutas;
+    const nuevasNotas = [nota, ...notasPedido];
+    setNotasPedido(nuevasNotas);
+    setCompromisosMinutas(compActualizados);
+    persistirMinutasLocal(minutas, compActualizados, nuevasNotas);
+    return nota;
+  };
+
+  const eliminarNotaPedido = async (id: string) => {
+    const res = await fetch(`/api/minutas/notas-pedido/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('No se pudo eliminar la Nota de Pedido');
+    const nuevasNotas = notasPedido.filter(n => n.id !== id);
+    setNotasPedido(nuevasNotas);
+    persistirMinutasLocal(minutas, compromisosMinutas, nuevasNotas);
   };
 
   // Persist handlers
@@ -860,6 +1329,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       },
       hitos,
       interferencias,
+      minutas: minutas.slice(0, 15).map(m => ({
+        codigo: m.codigo,
+        titulo: m.titulo,
+        fechaReunion: m.fechaReunion,
+        frente: m.frente,
+        resumen: m.resumen,
+      })),
+      compromisosMinutas: compromisosMinutas.slice(0, 50),
+      notasPedido: notasPedido.slice(0, 20).map(n => ({
+        numeroNota: n.numeroNota,
+        fechaEmision: n.fechaEmision,
+        destinatario: n.destinatario,
+        frente: n.frente,
+        asunto: n.asunto,
+      })),
       notasCampo: notasCampo ? notasCampo.slice(0, 3000) : '',
     };
   };
@@ -940,7 +1424,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       id: 'usr-' + Date.now(),
       texto: msg,
       esUsuario: true,
-      fecha: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      fecha: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      adjuntosNombres: chatAdjuntos.length > 0 ? chatAdjuntos.map(a => a.nombre) : undefined,
     };
 
     setChatMessages(prev => [...prev, userMsg]);
@@ -1018,6 +1503,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       pliegosReales,
       planoCompararA,
       planoCompararB,
+      chatAdjuntos,
+      minutas,
+      compromisosMinutas,
+      notasPedido,
       config,
       connectionStatus,
       megabytesR2,
@@ -1041,9 +1530,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       subirArchivoPliegoReal,
       subirPlanoComparador,
       eliminarPlanoComparador,
+      subirAdjuntoChat,
+      eliminarAdjuntoChat,
+      limpiarAdjuntosChat,
       agregarPliegoReal,
       eliminarPliegoReal,
       limpiarTodosPliegosReales,
+      sincronizarMinutasDrive,
+      subirMinutaArchivo,
+      registrarMinutaTexto,
+      eliminarMinuta,
+      agregarCompromisoMinuta,
+      actualizarCompromisoMinuta,
+      eliminarCompromisoMinuta,
+      generarNotaPedido,
+      eliminarNotaPedido,
       updateConfig,
       sincronizarDatos,
       saveHitos,

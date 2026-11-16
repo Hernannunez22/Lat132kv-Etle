@@ -11,6 +11,26 @@ interface DiagnosticoGeminiResult {
   latenciaMs: number;
   respuestaModelo?: string;
   detalle: string;
+  estadoProceso?: {
+    pid: number;
+    nodeVersion: string;
+    platform: string;
+    uptimeSegundos: number;
+    nodeEnv: string;
+    puerto: number;
+    clienteSdkInicializado: boolean;
+    fuenteClienteActivo: string | null;
+    pliegosEnMemoria: number;
+    timestamp: string;
+  };
+  errorTecnico?: {
+    nombre: string;
+    codigoHttp: number | string | null;
+    statusText: string | null;
+    mensaje: string;
+    causa: string | null;
+    pingEjecutado: boolean;
+  } | null;
 }
 
 export const ModalConfiguracion: React.FC = () => {
@@ -129,7 +149,7 @@ export const ModalConfiguracion: React.FC = () => {
                   <span>Diagnóstico de API Gemini</span>
                 </h4>
                 <p className="text-[10px] text-slate-400 mt-0.5">
-                  Ejecuta una llamada real desde el servidor para validar la conexión.
+                  Ejecuta un ping real desde el servidor para validar la conexión.
                 </p>
               </div>
               <button
@@ -188,7 +208,7 @@ export const ModalConfiguracion: React.FC = () => {
                   </div>
                   <div>
                     <span className="text-slate-500">Variable: </span>
-                    <span className="text-slate-100">{diagnostico.variableDetectada}</span>
+                    <span className="text-slate-100 break-all">{diagnostico.variableDetectada}</span>
                   </div>
                   {diagnostico.codigoHttp != null && (
                     <div>
@@ -202,11 +222,29 @@ export const ModalConfiguracion: React.FC = () => {
                       <span className="text-emerald-300">{diagnostico.respuestaModelo}</span>
                     </div>
                   )}
+                  {diagnostico.estadoProceso && (
+                    <div className="col-span-2 text-slate-400">
+                      <span className="text-slate-500">Proceso: </span>
+                      <span>
+                        PID {diagnostico.estadoProceso.pid} · {diagnostico.estadoProceso.nodeEnv} · uptime {diagnostico.estadoProceso.uptimeSegundos}s · SDK {diagnostico.estadoProceso.clienteSdkInicializado ? 'activo' : 'inactivo'}
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 <p className="text-[11px] leading-relaxed text-slate-200 border-t border-white/10 pt-2">
                   {diagnostico.detalle}
                 </p>
+
+                {diagnostico.errorTecnico && (
+                  <div className="rounded-lg bg-black/30 border border-white/10 p-2 text-[10px] font-mono text-rose-200 break-words">
+                    <span className="text-rose-400 font-semibold">
+                      [{diagnostico.errorTecnico.nombre}
+                      {diagnostico.errorTecnico.codigoHttp != null ? ` · HTTP ${diagnostico.errorTecnico.codigoHttp}` : ''}]
+                    </span>{' '}
+                    {diagnostico.errorTecnico.mensaje}
+                  </div>
+                )}
               </div>
             )}
           </div>

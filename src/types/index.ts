@@ -59,11 +59,27 @@ export interface FotoCampo {
   dataUrl: string;
 }
 
+export interface ChatAdjuntoPdf {
+  id: string;
+  nombre: string;
+  tipoMime: string;
+  tamanioBytes: number;
+  tamanioTexto: string;
+  fechaSubida: string;
+  paginas: number;
+  caracteresTexto: number;
+  esEscaneado: boolean;
+  tiempoProcesoMs: number;
+  metricasDetectadas?: string[];
+  contenidoTexto?: string;
+}
+
 export interface MensajeChat {
   id: string;
   texto: string;
   esUsuario: boolean;
   fecha?: string;
+  adjuntosNombres?: string[];
 }
 
 export interface AppConfig {
@@ -104,11 +120,64 @@ export interface PlanoComparacionDoc {
   metricasDetectadas?: string[];
 }
 
+export type EstadoCompromiso = 'PENDIENTE' | 'EN_CURSO' | 'CUMPLIDO' | 'INCUMPLIDO';
+
+export interface MinutaReunion {
+  id: string;
+  codigo: string;
+  titulo: string;
+  fechaReunion: string; // YYYY-MM-DD
+  frente: string;
+  participantes: string;
+  origen: 'drive' | 'archivo' | 'texto' | 'manual';
+  nombreArchivo?: string;
+  driveFileId?: string;
+  driveUrl?: string;
+  driveRuta?: string;
+  driveModifiedTime?: string;
+  resumen?: string;
+  contenidoTexto: string;
+  fechaCarga: string;
+}
+
+export interface CompromisoMinuta {
+  id: string;
+  minutaId: string;
+  minutaCodigo: string;
+  minutaFecha: string;
+  numeroItem: string;
+  descripcion: string;
+  responsable: string;
+  area: string; // Ingeniería / Obra Civil / Suministros / Gestión / etc.
+  frente: string;
+  fechaLimite: string; // YYYY-MM-DD
+  estado: EstadoCompromiso;
+  observaciones?: string;
+  documentosRelacionados?: string[];
+  notasPedidoIds?: string[];
+}
+
+export interface NotaPedidoIngenieria {
+  id: string;
+  numeroNota: string;
+  fechaEmision: string; // YYYY-MM-DD
+  emisor: string;
+  destinatario: string;
+  frente: string;
+  asunto: string;
+  plazoDescargoDias: number;
+  compromisoIds: string[];
+  minutasReferenciadas: string[];
+  contenidoMarkdown: string;
+  fuenteGeneracion: string;
+}
+
 export type TabType = 
   | 'dashboard' 
   | 'planos' 
   | 'comparador'
   | 'hitos' 
+  | 'minutas'
   | 'informes' 
   | 'interferencias' 
   | 'anotador' 
