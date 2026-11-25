@@ -1,14 +1,15 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { 
-  FileText, 
-  Zap, 
-  Copy, 
-  Download, 
-  Printer, 
-  Save, 
-  CheckCircle, 
-  RefreshCw 
+import { apiFetch, readJsonResponse } from '../utils/apiClient';
+import { MarkdownRenderer } from './MarkdownRenderer';
+import { descargarMarkdownComoWord, markdownToCleanHtml } from '../utils/exportWord';
+import {
+  Zap,
+  Copy,
+  Download,
+  Printer,
+  Save,
+  CheckCircle,
 } from 'lucide-react';
 
 const PLANTILLAS_INFORMES = {
@@ -19,9 +20,21 @@ const PLANTILLAS_INFORMES = {
 };
 
 export const InformesTab: React.FC = () => {
-  const { planos, hitos, totalPlanificados, config, ultimoInforme, setUltimoInforme } = useApp();
+  const {
+    planos,
+    hitos,
+    interferencias,
+    totalPlanificados,
+    notasCampo,
+    fotosCampo,
+    audiosCampo,
+    ultimoInforme,
+    setUltimoInforme,
+  } = useApp();
   const [solicitud, setSolicitud] = useState(PLANTILLAS_INFORMES.avance_diseno);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [fuenteInforme, setFuenteInforme] = useState<string | null>(null);
+  const [errorGeneracion, setErrorGeneracion] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [savedDbMessage, setSavedDbMessage] = useState('');
 
@@ -29,166 +42,82 @@ export const InformesTab: React.FC = () => {
     if (!solicitud.trim()) return;
 
     setIsGenerating(true);
+    setErrorGeneracion(null);
     const hoy = new Date();
     const fechaHoyStr = hoy.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
-    // Intentar backend si está configurado
-    let informeGenerado = '';
-    let respondioBackend = false;
-
-    if (config.apiUrl && config.apiUrl.startsWith('http')) {
-      let url = config.apiUrl;
-      if (url.includes('/edit')) url = url.replace(/\/edit.*$/, '/exec');
-      if (!url.endsWith('/exec')) url = url.replace(/\/?$/, '/exec');
-
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3500);
-
-        const res = await fetch(url, {
-          method: 'POST',
-          signal: controller.signal,
-          body: JSON.stringify({
-            accion: 'generar_informe_ejecutivo',
-            solicitudTexto: solicitud,
-            hitos: hitos
-          })
-        });
-        clearTimeout(timeoutId);
-        const data = await res.json();
-        if (data && data.exito && data.informeMarkdown) {
-          informeGenerado = data.informeMarkdown;
-          respondioBackend = true;
-        }
-      } catch (e) {
-        console.warn('API generation failed, falling back to instant local engine:', e);
+    try {
+      const res = await apiFetch('/api/informes/generar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          solicitud: solicitud.trim(),
+          planos,
+          totalPlanificados,
+          hitos,
+          interferencias,
+          notasCampo,
+          fotosCount: fotosCampo.length,
+          audiosCount: audiosCampo.length,
+        }),
+      });
+      const data = await readJsonResponse(res, 'Error generando informe');
+      if (!res.ok || !data?.exito || !data?.markdown) {
+        throw new Error(data?.error || `Error generando informe (HTTP ${res.status})`);
       }
-    }
-
-    if (!respondioBackend) {
-      // Motor de generación local basado 100% en datos vivos
+      setUltimoInforme(String(data.markdown));
+      setFuenteInforme(String(data.fuente || 'openrouter/free'));
+    } catch (err: any) {
+      // Respaldo offline estrictamente basado en datos reales vivos (sin fechas fijas ni textos inventados)
+      setErrorGeneracion(
+        err?.message ? `Generado en modo local (${err.message})` : 'Generado con datos locales.'
+      );
       const totalEmitidos = planos.length;
-      const avanceGlobalPct = totalPlanificados > 0 ? ((totalEmitidos / totalPlanificados) * 100).toFixed(1) : "0.0";
+      const totalApc = planos.filter(p => p.selloApc).length;
+      const avanceGlobalPct =
+        totalPlanificados > 0 ? ((totalEmitidos / totalPlanificados) * 100).toFixed(1) : '0.0';
 
-      // Detectar fecha de inicio
-      const fechaPrimerRegistro = new Date("2025-11-12");
-      const diffMs = Math.max(86400000, hoy.getTime() - fechaPrimerRegistro.getTime());
-      const diasTranscurridos = Math.max(1, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
-      const mesesTranscurridos = (diasTranscurridos / 30.417).toFixed(1);
-      const semanasTranscurridas = (diasTranscurridos / 7).toFixed(1);
+      const fechasValidas = planos
+        .map(p => String(p.fechaDocumento || p.fechaSubida || p.fecha || '').slice(0, 10))
+        .filter(f => /^\d{4}-\d{2}-\d{2}$/.test(f))
+        .sort();
+      const primerRegistroStr = fechasValidas[0] || hoy.toISOString().slice(0, 10);
 
-      const promedioPorMes = (totalEmitidos / (diasTranscurridos / 30.417)).toFixed(2);
-      const promedioPorSemana = (totalEmitidos / (diasTranscurridos / 7)).toFixed(2);
-      const promedioPorDia = (totalEmitidos / diasTranscurridos).toFixed(3);
-      const planosRestantes = Math.max(0, totalPlanificados - totalEmitidos);
+      const filasTabla = planos
+        .map((p, idx) => {
+          const est = p.selloApc ? '✅ Sello APC' : p.estado || 'En Circuito';
+          return `| ${idx + 1} | \`${p.codigo}\` | ${p.descripcion} | ${p.disciplina} | ${p.proyecto} | ${p.revision} | ${est} |`;
+        })
+        .join('\n');
 
-      // Conteo por frente
-      const frentesContador: Record<string, number> = {
-        'LAT El Bracho - Villa Quinteros': 0,
-        'ET Leales': 0,
-        'ET Villa Quinteros': 0,
-        'ET El Bracho': 0
-      };
+      const resumenInterf =
+        interferencias.length > 0
+          ? interferencias
+              .map(
+                c =>
+                  `- **${c.empresa}** (${c.carpetaNombre || c.empresa}): ${c.estadoTramite} | Vanos: ${c.vanosAfectados || '-'} | Faltantes: ${(c.faltantes || []).join('; ') || 'Ninguno'}`
+              )
+              .join('\n')
+          : '- Sin interferencias sincronizadas aún desde Drive.';
 
-      planos.forEach(p => {
-        const proy = p.proyecto || '';
-        if (proy.includes('LAT') || proy.includes('Bracho - Villa')) frentesContador['LAT El Bracho - Villa Quinteros']++;
-        else if (proy.includes('Leales')) frentesContador['ET Leales']++;
-        else if (proy.includes('Quinteros') || proy.includes('VQ')) frentesContador['ET Villa Quinteros']++;
-        else if (proy.includes('Bracho')) frentesContador['ET El Bracho']++;
-      });
+      const informeLocal =
+        `# 📑 ${solicitud.trim().split('\n')[0]}\n` +
+        `**FECHA DE CORTE:** ${fechaHoyStr} | **PRIMER REGISTRO:** ${primerRegistroStr}\n\n` +
+        `## 1. KPIs Reales de Ingeniería\n` +
+        `- **Planos Planificados:** ${totalPlanificados}\n` +
+        `- **Planos Emitidos:** ${totalEmitidos} (${avanceGlobalPct}%)\n` +
+        `- **Con Sello APC:** ${totalApc}\n` +
+        `- **Cruces reales cargados:** ${interferencias.length}\n\n` +
+        `## 2. Estado de Cruces / Interferencias Reales\n${resumenInterf}\n\n` +
+        `## 3. Catálogo de Planos (${totalEmitidos})\n` +
+        `| N° | CÓDIGO | DESCRIPCIÓN | DISCIPLINA | FRENTE | REV | ESTADO |\n|---|---|---|---|---|:---:|:---:|\n` +
+        filasTabla;
 
-      const desgloseFrentes = Object.keys(frentesContador).map(f => 
-        `* **${f}:** ${frentesContador[f]} planos emitidos formalmente.`
-      ).join('\n');
-
-      // Tabla de planos
-      const filasTabla = planos.map((p, idx) => {
-        const est = p.selloApc ? "✅ Sello APC" : (p.estado || "En Circuito");
-        return `| ${idx + 1} | \`${p.codigo}\` | ${p.descripcion} | ${p.disciplina} | ${p.proyecto} | ${p.revision} | ${est} |`;
-      }).join('\n');
-
-      // Hitos
-      const hitosVencidos: string[] = [];
-      const hitosProximos: string[] = [];
-
-      hitos.forEach(h => {
-        const fObj = new Date(h.fechaObjetivo + "T00:00:00");
-        const diff = Math.ceil((fObj.getTime() - hoy.getTime()) / (1000 * 60 * 60 * 24));
-        if (diff < 0) {
-          hitosVencidos.push(`- 🔴 **Hito [${h.codigo}] - "${h.nombre}":** Vencido hace ${Math.abs(diff)} días (${h.fechaObjetivo}). Frente: ${h.frente}. Planos: ${(h.planosRequeridos || []).join(', ')}.`);
-        } else if (diff <= 60) {
-          hitosProximos.push(`- 🟡 **Hito [${h.codigo}] - "${h.nombre}":** Vence en ${diff} días (${h.fechaObjetivo}). Frente: ${h.frente}.`);
-        }
-      });
-
-      informeGenerado = `
-# 📑 INFORME TÉCNICO EJECUTIVO: AVANCE DE INGENIERÍA, AUDITORÍA DE HITOS Y RITMO DE CARGA
-**PROYECTO:** Corredor Eléctrico 132 kV (ET Leales, ET El Bracho, ET Villa Quinteros y LAT 132 kV)  
-**FECHA DE CORTE Y AUDITORÍA:** ${fechaHoyStr}  
-**EMISOR:** Dirección Técnica & Control de Proyecto (UTE)  
-**DESTINATARIO:** Supervisión / Comitente  
-**REFERENCIA:** Evaluación de avance documental, velocidad promedio de emisión y cumplimiento de cronograma al día de hoy.
-
----
-
-### 1. ESTADO CUANTITATIVO DEL TRABAJO DE DISEÑO AL DÍA DE HOY
-A la fecha de corte (**${fechaHoyStr}**), se encuentran formalmente registrados en el sistema un consolidado de **${totalEmitidos} planos y memorias técnicas** sobre un total contractual planificado de **${totalPlanificados} planos**, lo que representa un avance físico de ingeniería del **${avanceGlobalPct}%**.
-
-**Distribución real de planos emitidos por frente de obra:**
-${desgloseFrentes}
-
----
-
-### 2. ANÁLISIS DE RITMO, VELOCIDAD Y PROMEDIO DE CARGA DE ARCHIVOS
-Evaluando el período corrido desde el primer registro formal del proyecto (12/11/2025) hasta la fecha de corte de hoy (**${fechaHoyStr}**):
-
-* **Tiempo Transcurrido:** **${diasTranscurridos} días corridos** (${mesesTranscurridos} meses / ${semanasTranscurridas} semanas).
-* **Volumen Total Extraído:** **${totalEmitidos} documentos técnicos registrados en el sistema**.
-* **Velocidad Promedio Histórica Real:**
-  * 📈 **${promedioPorMes} planos por mes**.
-  * ⏱️ **${promedioPorSemana} planos por semana**.
-  * 📄 **${promedioPorDia} planos por día corrido**.
-
-**Diagnóstico sobre el Ritmo de Emisión frente al Cronograma:**
-* **Planos Restantes para el 100% Contractual:** **${planosRestantes} documentos**.
-* El ritmo histórico actual refleja una cadencia de **~${promedioPorMes} planos/mes**. Se requiere acelerar las emisiones de ingeniería ejecutiva de detalle para acompañar el inicio de los frentes de montaje y obra civil.
-
----
-
-### 3. AUDITORÍA DEL CRONOGRAMA: HITOS CON FECHA EXIGIBLE A HOY (${fechaHoyStr})
-${hitosVencidos.length > 0 ? hitosVencidos.join('\n\n') : 'No se registran hitos con fecha límite vencida a la fecha de hoy.'}
-
----
-
-### 4. NÓMINA COMPLETA DE TODOS LOS ARCHIVOS Y PLANOS EMITIDOS A LA FECHA (${totalEmitidos} DOCUMENTOS)
-| N° | CÓDIGO OFICIAL | DESCRIPCIÓN DEL DOCUMENTO | DISCIPLINA | FRENTE / OBRA | REV | ESTADO |
-|---|---|---|---|---|:---:|:---:|
-${filasTabla}
-
----
-
-### 5. DIAGNÓSTICO FORENSE DE CAUSA RAÍZ DE LAS DEMORAS REGISTRADAS
-1. **Circuito de Devolución TRANSNOA ➔ UTE:** Las observaciones emitidas por la supervisión vinculadas a los perfiles de cruce de interferencias (RN 38 y gasoducto TGN) han acumulado demoras en su traslado a proyectistas.
-2. **Retención en UTE / Proyectista:** Demoras en responder observaciones de cálculo de fundaciones y adecuación de ingresos a ET Villa Quinteros.
-3. **Deslinde de Responsabilidades:** Se deja constancia de las fechas efectivas de entrega en mesa de entradas para justificar la reprogramación de los hitos civiles de campo.
-
----
-
-### 6. PRÓXIMOS HITOS CONTRACTUALES EN VENTANA CRÍTICA
-${hitosProximos.length > 0 ? hitosProximos.join('\n\n') : 'Los hitos subsiguientes se encuentran en plazo regular.'}
-
----
-
-### 7. ACCIONES CORRECTIVAS INMEDIATAS
-1. **Emisión de Paquetes Prioritarios:** Exigir al proyectista la remisión urgente de las memorias de cálculo de fundaciones y planos de cruce observados.
-2. **Acelerar la Cadencia de Emisión:** Aumentar el ritmo de entregas mensuales para cubrir los ${planosRestantes} planos restantes.
-3. **Despacho Inmediato a TRANSNOA:** Plazo máximo de 48 horas en UTE para el traslado de cualquier comunicación técnica recibida.
-      `.trim();
+      setUltimoInforme(informeLocal);
+      setFuenteInforme('datos-vivos-locales');
+    } finally {
+      setIsGenerating(false);
     }
-
-    setUltimoInforme(informeGenerado);
-    setIsGenerating(false);
   };
 
   const copiarPortapapeles = () => {
@@ -200,44 +129,12 @@ ${hitosProximos.length > 0 ? hitosProximos.join('\n\n') : 'Los hitos subsiguient
 
   const descargarWord = () => {
     if (!ultimoInforme) return;
-
     const fechaDoc = new Date().toISOString().split('T')[0];
-    const tituloDoc = `Informe_Tecnico_Ejecutivo_Obra_132kV_${fechaDoc}`;
-
-    const htmlContenido = renderMarkdownToHtml(ultimoInforme);
-
-    const contenidoWordHtml = `
-      <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-        <head>
-          <meta charset='utf-8'>
-          <title>Informe Técnico Ejecutivo - Obras 132 kV</title>
-          <style>
-            body { font-family: 'Calibri', 'Arial', sans-serif; font-size: 11pt; color: #1e293b; line-height: 1.5; padding: 30px; }
-            h1 { font-size: 16pt; color: #0f172a; border-bottom: 2pt solid #0284c7; padding-bottom: 6px; margin-top: 15px; text-transform: uppercase; }
-            h2 { font-size: 13pt; color: #0369a1; border-bottom: 1pt solid #cbd5e1; padding-bottom: 4px; margin-top: 18px; }
-            h3 { font-size: 11.5pt; color: #15803d; margin-top: 14px; text-transform: uppercase; }
-            table { width: 100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 15px; font-size: 9.5pt; }
-            th { background-color: #0f172a; color: #ffffff; font-weight: bold; padding: 6px 8px; border: 1pt solid #334155; text-align: left; }
-            td { padding: 5px 8px; border: 1pt solid #cbd5e1; color: #1e293b; }
-            tr:nth-child(even) td { background-color: #f8fafc; }
-            code { font-family: 'Consolas', monospace; background-color: #f1f5f9; color: #0369a1; padding: 2px 4px; font-weight: bold; }
-          </style>
-        </head>
-        <body>
-          ${htmlContenido}
-        </body>
-      </html>
-    `;
-
-    const blob = new Blob(['\ufeff' + contenidoWordHtml], { type: 'application/msword' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${tituloDoc}.doc`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    descargarMarkdownComoWord(
+      `Informe_Tecnico_Ejecutivo_Obra_132kV_${fechaDoc}`,
+      'Informe Técnico Ejecutivo - Obras 132 kV',
+      ultimoInforme
+    );
   };
 
   const imprimir = () => {
@@ -251,7 +148,7 @@ ${hitosProximos.length > 0 ? hitosProximos.join('\n\n') : 'Los hitos subsiguient
       printIframe.style.height = '0';
       printIframe.style.border = '0';
       document.body.appendChild(printIframe);
-      const htmlContenido = renderMarkdownToHtml(ultimoInforme);
+      const htmlContenido = markdownToCleanHtml(ultimoInforme);
       const doc = printIframe.contentWindow?.document;
       if (doc) {
         doc.open();
@@ -283,73 +180,38 @@ ${hitosProximos.length > 0 ? hitosProximos.join('\n\n') : 'Los hitos subsiguient
           setTimeout(() => printIframe.remove(), 1000);
         }, 300);
       }
-    } catch (e) {
+    } catch {
       window.print();
     }
   };
 
-  const guardarEnBD = () => {
+  const guardarEnHistorialYNube = () => {
     if (!ultimoInforme) return;
     try {
-      const fechaClave = new Date().toISOString().replace(/[:.]/g, "-");
+      const fechaClave = new Date().toISOString().replace(/[:.]/g, '-');
       const saved = JSON.parse(localStorage.getItem('informes_privados_obra') || '[]');
       saved.unshift({
-        titulo: `Informe_${fechaClave.split("T")[0]}`,
+        titulo: `Informe_${fechaClave.split('T')[0]}`,
         fecha: new Date().toLocaleString(),
-        contenido: ultimoInforme
+        contenido: ultimoInforme,
       });
       localStorage.setItem('informes_privados_obra', JSON.stringify(saved.slice(0, 15)));
-      setSavedDbMessage('✅ Guardado en Base de Datos (R2 / Local)');
+      setUltimoInforme(ultimoInforme);
+      setSavedDbMessage('✅ Guardado en Historial y Nube');
       setTimeout(() => setSavedDbMessage(''), 3000);
     } catch (e) {
       console.error(e);
     }
   };
 
-  const renderMarkdownToHtml = (md: string) => {
-    let html = md
-      .replace(/^# (.*$)/gim, '<h1 class="text-base font-extrabold text-white border-b border-slate-700 pb-2 mb-3 tracking-wide">$1</h1>')
-      .replace(/^## (.*$)/gim, '<h2 class="text-sm font-bold text-sky-400 border-b border-slate-800 pb-1 mt-4 mb-2 tracking-wide">$1</h2>')
-      .replace(/^### (.*$)/gim, '<h3 class="text-xs font-bold text-emerald-400 mt-3 mb-1.5 uppercase tracking-wider">$1</h3>')
-      .replace(/\*\*([^*]+)\*\*/g, '<b class="text-white">$1</b>')
-      .replace(/`([^`]+)`/g, '<code class="bg-slate-900 border border-slate-800 text-sky-300 px-1.5 py-0.5 rounded font-mono text-[11px]">$1</code>')
-      .replace(/\* ([^\n]+)/g, '<div class="flex items-start gap-2 ml-1 mt-1 text-slate-300"><span class="text-emerald-400 shrink-0">•</span><span>$1</span></div>')
-      .replace(/\n---/g, '<hr class="border-slate-800 my-3">');
-
-    if (html.includes('|')) {
-      html = html.replace(/((?:\|[^\n]+\|\r?\n)+)/g, function(tablaMd) {
-        const lineas = tablaMd.trim().split('\n');
-        if (lineas.length < 2) return tablaMd;
-        let ths = '';
-        let tds = '';
-
-        lineas.forEach((lin, idx) => {
-          if (lin.includes('---')) return;
-          const celdas = lin.split('|').map(c => c.trim()).filter((_, i, arr) => i > 0 && i < arr.length - 1);
-          if (idx === 0) {
-            ths = celdas.map(c => `<th class="px-2.5 py-2 text-left bg-slate-900 text-sky-400 font-bold border border-slate-800 text-[10px] uppercase font-mono">${c}</th>`).join('');
-          } else {
-            const celdasHtml = celdas.map(c => `<td class="px-2.5 py-1.5 border border-slate-800/80 text-[10.5px] text-slate-200">${c}</td>`).join('');
-            tds += `<tr class="hover:bg-slate-900/60">${celdasHtml}</tr>`;
-          }
-        });
-
-        return `<div class="overflow-x-auto my-3 rounded-xl border border-slate-800"><table class="w-full border-collapse"><thead><tr>${ths}</tr></thead><tbody>${tds}</tbody></table></div>`;
-      });
-    }
-
-    // Convert regular newlines that are not inside tags
-    return html.replace(/([^>])\n/g, '$1<br>');
-  };
-
   return (
     <div className="space-y-4">
       {/* Top Card Bento Formulario */}
-      <div className="bento-card p-5 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/20 border-emerald-900/30 space-y-4">
+      <div className="bento-card p-3 sm:p-5 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/20 border-emerald-900/30 space-y-3 sm:space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-800">
-          <div className="flex items-center gap-2.5">
-            <span className="text-xl">📄</span>
-            <div>
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="text-xl shrink-0">📄</span>
+            <div className="min-w-0">
               <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400">
                 Generador de Informes Ejecutivos en 1 Clic
               </h3>
@@ -358,7 +220,7 @@ ${hitosProximos.length > 0 ? hitosProximos.join('\n\n') : 'Los hitos subsiguient
               </p>
             </div>
           </div>
-          <span className="px-2.5 py-1 bg-emerald-950 text-emerald-400 border border-emerald-800 text-[10px] font-mono font-bold rounded-lg self-start sm:self-auto">
+          <span className="px-2.5 py-1 bg-emerald-950 text-emerald-400 border border-emerald-800 text-[10px] font-mono font-bold rounded-lg self-start sm:self-auto shrink-0 whitespace-nowrap">
             ⚡ 1 Clic
           </span>
         </div>
@@ -368,7 +230,7 @@ ${hitosProximos.length > 0 ? hitosProximos.join('\n\n') : 'Los hitos subsiguient
           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
             Plantillas Rápidas de Solicitud:
           </span>
-          <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
+          <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1 text-xs">
             <button 
               onClick={() => setSolicitud(PLANTILLAS_INFORMES.avance_diseno)}
               className="px-3 py-1.5 bg-slate-800/90 hover:bg-slate-700 text-slate-200 rounded-lg whitespace-nowrap font-medium border border-slate-700 transition-all cursor-pointer"
@@ -411,13 +273,13 @@ ${hitosProximos.length > 0 ? hitosProximos.join('\n\n') : 'Los hitos subsiguient
         </div>
 
         {/* Botones de Acción */}
-        <div className="flex items-center justify-between pt-1">
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
           <button 
             onClick={ejecutarGeneracion}
             disabled={isGenerating}
-            className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-900/30 flex items-center gap-2 active:scale-95 transition-all cursor-pointer disabled:opacity-60"
+            className="w-full sm:w-auto px-4 sm:px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-2 active:scale-95 transition-all cursor-pointer disabled:opacity-60"
           >
-            <Zap className={`w-4 h-4 ${isGenerating ? 'animate-spin' : ''}`} />
+            <Zap className={`w-4 h-4 shrink-0 ${isGenerating ? 'animate-spin' : ''}`} />
             <span>{isGenerating ? 'Compilando Datos Vivos con IA...' : 'Generar Informe Completo en 1 Clic'}</span>
           </button>
           <button 
@@ -431,7 +293,7 @@ ${hitosProximos.length > 0 ? hitosProximos.join('\n\n') : 'Los hitos subsiguient
 
       {/* Spinner Loader */}
       {isGenerating && (
-        <div className="bento-card p-8 text-center space-y-3 border-emerald-800/40 bg-slate-900/90">
+        <div className="bento-card p-6 sm:p-8 text-center space-y-3 border-emerald-800/40 bg-slate-900/90">
           <div className="w-8 h-8 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
           <div className="text-xs font-bold text-white">Compilando datos vivos de planos, cronograma y contratos...</div>
           <p className="text-[11px] text-slate-400 max-w-md mx-auto">
@@ -442,12 +304,17 @@ ${hitosProximos.length > 0 ? hitosProximos.join('\n\n') : 'Los hitos subsiguient
 
       {/* Hoja del Informe Renderizado */}
       {ultimoInforme && !isGenerating && (
-        <div className="space-y-3">
-          <div className="bento-card p-4 flex flex-wrap items-center justify-between gap-2 border-emerald-800/60 bg-emerald-950/20">
-            <div className="flex items-center gap-2">
+        <div className="space-y-3 min-w-0">
+          <div className="bento-card p-3 sm:p-4 flex flex-wrap items-center justify-between gap-2 border-emerald-800/60 bg-emerald-950/20">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-emerald-400 font-bold text-xs">✅ Informe Técnico Generado</span>
+              {fuenteInforme && (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-sky-300">
+                  {fuenteInforme}
+                </span>
+              )}
               <span className="text-[11px] text-slate-400 font-mono">
-                | {planos.length} planos emitidos analizados
+                | {planos.length} planos · {interferencias.length} cruces
               </span>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
@@ -473,21 +340,26 @@ ${hitosProximos.length > 0 ? hitosProximos.join('\n\n') : 'Los hitos subsiguient
                 <span>Imprimir / PDF</span>
               </button>
               <button 
-                onClick={guardarEnBD} 
+                onClick={guardarEnHistorialYNube} 
                 className="px-3 py-1.5 rounded-lg bg-emerald-950 hover:bg-emerald-900 text-emerald-300 text-[11px] font-bold border border-emerald-800 flex items-center gap-1.5 transition-all cursor-pointer" 
-                title="Guarda en repositorio privado de R2 / Local"
+                title="Guarda el informe en el historial local y en tu espacio en la nube"
               >
                 <Save className="w-3.5 h-3.5" />
-                <span>{savedDbMessage || 'Guardar en BD (R2 Privado)'}</span>
+                <span>{savedDbMessage || 'Guardar Historial (Nube)'}</span>
               </button>
             </div>
           </div>
 
+          {errorGeneracion && (
+            <div className="text-[11px] text-amber-300 bg-amber-950/30 border border-amber-800/40 rounded-lg px-3 py-2">
+              {errorGeneracion}
+            </div>
+          )}
+
           {/* Hoja de Papel Digital del Informe */}
-          <div 
-            className="bento-card p-6 lg:p-8 space-y-4 text-xs leading-relaxed bg-slate-950/90 border-slate-800 text-slate-200 font-sans shadow-2xl"
-            dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(ultimoInforme) }}
-          />
+          <div className="bento-card p-3 sm:p-6 lg:p-8 text-xs leading-relaxed bg-slate-950/90 border-slate-800 text-slate-200 font-sans shadow-2xl w-full max-w-full overflow-x-auto">
+            <MarkdownRenderer content={ultimoInforme} />
+          </div>
         </div>
       )}
     </div>

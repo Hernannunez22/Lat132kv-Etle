@@ -149,58 +149,58 @@ export const ModalCargarPliegos: React.FC<ModalCargarPliegosProps> = ({ isOpen, 
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-2.5 sm:p-4">
       <div className="bg-[#0f172a] border border-slate-800 rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
         
         {/* Cabecera */}
-        <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/60">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400">
-              <BookOpen className="w-5 h-5" />
+        <div className="p-3 sm:p-4 border-b border-slate-800 flex items-center justify-between gap-2 bg-slate-900/60">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400 shrink-0">
+              <BookOpen className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
-            <div>
-              <h3 className="text-sm font-bold text-white">Gestor de Pliegos Reales de Licitación</h3>
-              <p className="text-[11px] text-slate-400">
+            <div className="min-w-0">
+              <h3 className="text-xs sm:text-sm font-bold text-white truncate">Gestor de Pliegos Reales de Licitación</h3>
+              <p className="text-[11px] text-slate-400 truncate">
                 Soporta pliegos pesados (250 MB+) mediante subida por partes e indexación única
               </p>
             </div>
           </div>
           <button 
             onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
+            className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Pestañas de Carga */}
-        <div className="flex border-b border-slate-800 px-4 bg-slate-950">
+        <div className="flex border-b border-slate-800 px-2.5 sm:px-4 bg-slate-950 overflow-x-auto flex-nowrap no-scrollbar">
           <button
             onClick={() => setActiveTab('archivo')}
-            className={`py-3 px-4 text-xs font-bold border-b-2 transition-colors cursor-pointer flex items-center gap-2 ${
+            className={`py-2.5 sm:py-3 px-3 sm:px-4 text-xs font-bold border-b-2 transition-colors cursor-pointer flex items-center gap-2 whitespace-nowrap shrink-0 ${
               activeTab === 'archivo'
                 ? 'border-sky-500 text-sky-400'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Upload className="w-4 h-4" />
+            <Upload className="w-4 h-4 shrink-0" />
             <span>Subir Archivo (PDF / Word / TXT)</span>
           </button>
           <button
             onClick={() => setActiveTab('pegar')}
-            className={`py-3 px-4 text-xs font-bold border-b-2 transition-colors cursor-pointer flex items-center gap-2 ${
+            className={`py-2.5 sm:py-3 px-3 sm:px-4 text-xs font-bold border-b-2 transition-colors cursor-pointer flex items-center gap-2 whitespace-nowrap shrink-0 ${
               activeTab === 'pegar'
                 ? 'border-sky-500 text-sky-400'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
-            <FileCode className="w-4 h-4" />
+            <FileCode className="w-4 h-4 shrink-0" />
             <span>Pegar Texto o Artículos Directamente</span>
           </button>
         </div>
 
         {/* Contenido Principal con Scroll */}
-        <div className="p-4 overflow-y-auto space-y-4 flex-1">
+        <div className="p-3 sm:p-4 overflow-y-auto space-y-3 sm:space-y-4 flex-1">
           {mensajeEstado && (
             <div className="p-3 rounded-xl bg-sky-950/60 border border-sky-500/30 text-xs text-sky-200 space-y-2">
               <div className="flex items-center justify-between gap-2">
@@ -253,7 +253,7 @@ export const ModalCargarPliegos: React.FC<ModalCargarPliegosProps> = ({ isOpen, 
                   setIsDragging(false);
                 }}
                 onDrop={handleDrop}
-                className={`border-2 border-dashed rounded-2xl p-6 text-center transition-all flex flex-col items-center justify-center space-y-2.5 ${
+                className={`border-2 border-dashed rounded-2xl p-4 sm:p-6 text-center transition-all flex flex-col items-center justify-center space-y-2.5 ${
                   isProcessing
                     ? 'border-sky-500/50 bg-sky-950/20 cursor-wait opacity-80'
                     : isDragging
@@ -384,15 +384,15 @@ export const ModalCargarPliegos: React.FC<ModalCargarPliegosProps> = ({ isOpen, 
                 {pliegosReales.map(pliego => (
                   <div 
                     key={pliego.id}
-                    className="p-3 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-3 hover:border-slate-700 transition-colors"
+                    className="p-2.5 sm:p-3 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-2 sm:gap-3 hover:border-slate-700 transition-colors"
                   >
-                    <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
                       <div className="w-8 h-8 rounded-lg bg-sky-500/10 text-sky-400 flex items-center justify-center shrink-0">
                         <FileText className="w-4 h-4" />
                       </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <h5 className="text-xs font-bold text-white truncate max-w-md">{pliego.nombre}</h5>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                          <h5 className="text-xs font-bold text-white truncate max-w-full">{pliego.nombre}</h5>
                           {pliego.esEscaneado ? (
                             <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-500/10 text-amber-300 border border-amber-500/20 flex items-center gap-1">
                               <ScanText className="w-2.5 h-2.5" />
@@ -440,11 +440,11 @@ export const ModalCargarPliegos: React.FC<ModalCargarPliegosProps> = ({ isOpen, 
 
         {/* Modal interno para previsualizar texto de pliego */}
         {pliegoVisualizando && (
-          <div className="fixed inset-0 z-60 bg-black/80 flex items-center justify-center p-4">
-            <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-2xl max-h-[80vh] flex flex-col p-4 shadow-2xl">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                <div>
-                  <h4 className="text-xs font-bold text-white truncate max-w-md">
+          <div className="fixed inset-0 z-60 bg-black/80 flex items-center justify-center p-2.5 sm:p-4">
+            <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col p-3 sm:p-4 shadow-2xl">
+              <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-800">
+                <div className="min-w-0 flex-1">
+                  <h4 className="text-xs font-bold text-white truncate">
                     Contenido: {pliegoVisualizando.nombre}
                   </h4>
                   {pliegoVisualizando.paginas && (
@@ -455,7 +455,7 @@ export const ModalCargarPliegos: React.FC<ModalCargarPliegosProps> = ({ isOpen, 
                 </div>
                 <button 
                   onClick={() => setPliegoVisualizando(null)}
-                  className="text-slate-400 hover:text-white cursor-pointer"
+                  className="text-slate-400 hover:text-white cursor-pointer shrink-0"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -476,13 +476,13 @@ export const ModalCargarPliegos: React.FC<ModalCargarPliegosProps> = ({ isOpen, 
         )}
 
         {/* Pie */}
-        <div className="p-3 border-t border-slate-800 bg-slate-950 flex items-center justify-between">
+        <div className="p-3 border-t border-slate-800 bg-slate-950 flex flex-wrap items-center justify-between gap-2">
           <span className="text-[11px] text-slate-400">
             {pliegosReales.length} pliego(s) real(es) registrado(s)
           </span>
           <button
             onClick={onClose}
-            className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-xl text-xs cursor-pointer transition-colors shadow-md"
+            className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-xl text-xs cursor-pointer transition-colors shadow-md whitespace-nowrap"
           >
             Listo, ir al Chat IA
           </button>

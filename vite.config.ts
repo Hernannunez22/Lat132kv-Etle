@@ -9,7 +9,7 @@ export default defineConfig({
     react(),
     tailwindcss(),
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
       includeAssets: [
         'icon.svg',
         'apple-touch-icon.png',
@@ -54,10 +54,17 @@ export default defineConfig({
       workbox: {
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-        navigateFallbackDenylist: [/^\/api\//],
+        cleanupOutdatedCaches: true,
+        skipWaiting: false,
+        clientsClaim: false,
+        navigateFallbackDenylist: [/^\/api\//, /^\/__/],
         runtimeCaching: [
           {
-            urlPattern: /^\/api\/(pliegos|minutas|comparador\/planos|chat\/adjuntos)$/i,
+            urlPattern: ({ url, request }) =>
+              request.method === 'GET' &&
+              /^\/api\/(pliegos|minutas|interferencias|notas-libro|comparador\/planos|chat\/adjuntos)$/i.test(
+                url.pathname
+              ),
             handler: 'NetworkFirst',
             options: {
               cacheName: 'obras132kv-api-cache',
@@ -67,7 +74,10 @@ export default defineConfig({
                 maxAgeSeconds: 60 * 60 * 24 * 7,
               },
               cacheableResponse: {
-                statuses: [0, 200],
+                statuses: [200],
+                headers: {
+                  'content-type': 'application/json',
+                },
               },
             },
           },
@@ -102,8 +112,7 @@ export default defineConfig({
         ],
       },
       devOptions: {
-        enabled: true,
-        type: 'module',
+        enabled: false,
       },
     }),
   ],
@@ -111,5 +120,10 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 3000,
     allowedHosts: true,
+    hmr: false,
+    ws: false,
+    watch: {
+      ignored: ['**/dist/**', '**/dev-dist/**', '**/data_cache/**', '**/uploads/**'],
+    },
   },
 });

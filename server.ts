@@ -1,9 +1,21 @@
 import express from 'express';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
-import { PliegoReal, MinutaReunion, CompromisoMinuta, NotaPedidoIngenieria, EstadoCompromiso } from './src/types';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import {
+  PliegoReal,
+  MinutaReunion,
+  CompromisoMinuta,
+  NotaPedidoIngenieria,
+  EstadoCompromiso,
+  NotaLibro,
+  Interferencia,
+  ActorNotaLibro,
+  EstadoRespuestaNota,
+  SentidoNotaLibro,
+} from './src/types';
 import { buscarYExtraerDePliegosReales } from './src/data/pliegosContractuales';
+import { attachVerifiedFirebaseUser, sanitizeSafeId, type FirebaseVerifiedUser } from './server/authMiddleware';
 import {
   PliegoIndexado,
   procesarArchivoPliego,
@@ -43,16 +55,112 @@ import {
 import {
   ChatAdjuntoIndexado,
   cargarChatAdjuntos,
+  guardarChatAdjunto,
   eliminarChatAdjuntoDisco,
   limpiarChatAdjuntosDisco,
   indexarChatAdjuntoBuffer,
   indexarChatAdjuntoDesdeArchivo,
   auditarAdjuntoVsPliegoLocal,
 } from './server/chatAdjuntos';
+import {
+  cargarStoreInterferencias,
+  guardarStoreInterferencias,
+  sincronizarInterferenciasDesdeGoogleDrive,
+} from './server/driveInterferencias';
+import {
+  cargarStoreNotasLibro,
+  guardarStoreNotasLibro,
+  analizarNotaLibroConIA,
+  recalcularHilosYRespuestas,
+  construirContextoNotasLibro,
+  construirFallbackLocalNotasLibro,
+  normalizarActorNota,
+  normalizarTipoNota,
+  canonicalizarCodigoNota,
+} from './server/notasLibroManager';
+import { sincronizarNotasLibroDesdeGoogleDrive } from './server/driveNotasLibro';
+import {
+  DriveDocumentoIndexado,
+  cargarDriveDocumentosStore,
+  buscarYLeerDocumentosDriveEnVivo,
+  sincronizarDocsTecnicosDriveCarpeta,
+  extraerTerminosBusquedaDrive,
+  verificarConexionDrive,
+} from './server/driveDocumentos';
+import { analizarYExpandirConsulta } from './server/semanticSearch';
+import {
+  ElencosDriveState,
+  DEFAULT_ELENCOS_FOLDER_ID,
+  cargarElencosDriveStore,
+  sincronizarElencosDesdeGoogleDrive,
+} from './server/driveElencos';
+import {
+  PRIMARY_GEMINI_MODEL,
+  OPENROUTER_FREE_MODEL,
+  AUDIO_TRANSCRIBE_MODEL,
+  DEFAULT_TEXT_MODELS,
+  obtenerCandidatosApiKeys,
+  obtenerResumenVariablesEntorno,
+  clasificarErrorGemini,
+  formatearAvisoErrorGemini,
+  generarContenidoConFallback,
+  generarStreamConFallback,
+  sanitizarTextoError,
+  getPreferredGeminiModel,
+  setPreferredGeminiModel,
+  getLastWorkingGeminiInfo,
+  getUltimoErrorGemini,
+  setUltimoErrorGemini,
+  clearUltimoErrorGemini,
+  getGeminiPrecisionState,
+  updateGeminiPrecisionConfig,
+  resetGeminiUsoDiario,
+  resolverEjecucionPrecision,
+  registrarConsumoGemini,
+  getOpenRouterModeloPreferido,
+  MASTER_ADMIN_EMAIL,
+  isModelosPagosHabilitados,
+  setModelosPagosHabilitados,
+  type IntentoModeloResultado,
+} from './server/geminiClient';
+import {
+  clasificarErrorOpenRouter,
+  formatearAvisoErrorOpenRouter,
+  generarChatOpenRouter,
+  generarStreamOpenRouter,
+  generarVisionOpenRouter,
+  obtenerCandidatosOpenRouterKeys,
+  obtenerResumenOpenRouterEnv,
+  refrescarModelosGratuitosOpenRouter,
+  tieneOpenRouterConfigurado,
+  type HistorialTurnoOpenRouter,
+} from './server/openRouterClient';
+import {
+  generarBorradorMinutaDesdeTranscripcion,
+  getRutaAudioStaging,
+  getRutaAudioUploadTemp,
+  obtenerResumenGroqEnv,
+  sanitizarErrorGroq,
+  tieneGroqConfigurado,
+  transcribirAudioCortoConGroq,
+  transcribirAudioLargo,
+} from './server/groqAudio';
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-const GEMINI_MODEL = 'gemini-3.8-flash';
+const GEMINI_MODEL = PRIMARY_GEMINI_MODEL;
+const GEMINI_TRANSCRIBE_MODEL = AUDIO_TRANSCRIBE_MODEL;
+
+app.use('/api', attachVerifiedFirebaseUser);
+
+function esUsuarioMaestroRequest(req: express.Request): boolean {
+  const user = (req as express.Request & { firebaseUser?: FirebaseVerifiedUser }).firebaseUser;
+  return Boolean(
+    user?.emailVerified &&
+      typeof user.email === 'string' &&
+      user.email.toLowerCase().trim() === MASTER_ADMIN_EMAIL
+  );
+}
 
 type DestinoSubida = 'pliego' | 'planoA' | 'planoB' | 'chatPdf';
 
@@ -74,65 +182,129 @@ interface JobSubida {
 
 const jobsSubida = new Map<string, JobSubida>();
 
-// Inicialización de cliente Gemini con header aistudio-build
-let ultimoErrorGemini: string | null = null;
+interface JobAudioMinuta {
+  id: string;
+  nombre: string;
+  tipoMime: string;
+  totalBytes: number;
+  modeloMinutaId?: string;
+  codigo?: string;
+  titulo?: string;
+  fechaReunion?: string;
+  frente?: string;
+  participantes?: string;
+  motor: 'gratuito' | 'gemini';
+  estado: 'subiendo' | 'procesando' | 'completado' | 'error';
+  progreso: number;
+  detalle: string;
+  creadoEn: number;
+  resultado?: {
+    transcripcionMarcaTiempo: string;
+    transcripcionLimpia: string;
+    borradorMarkdown: string;
+    segmentosProcesados: number;
+    modeloTranscripcion: string;
+    fuenteRedaccion: string;
+    modeloReferenciaUsado: string | null;
+  };
+  error?: string;
+}
 
-function limpiarValorApiKey(raw?: string): string {
-  if (!raw) return '';
-  let k = raw.trim();
-  if (/^(GEMINI_API_KEY|API_KEY)\s*=/i.test(k)) {
-    k = k.replace(/^(GEMINI_API_KEY|API_KEY)\s*=/i, '').trim();
+const jobsAudioMinuta = new Map<string, JobAudioMinuta>();
+const MAX_AUDIO_MINUTA_BYTES = 250 * 1024 * 1024;
+
+function decodeAudioHeader(val: unknown, fallback = ''): string {
+  const raw = typeof val === 'string' ? val : '';
+  if (!raw) return fallback;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
   }
-  k = k.replace(/^['"]+|['"]+$/g, '').trim();
-  if (!k || /MY_GEMINI_API_KEY/i.test(k) || /^(YOUR_API_KEY|TU_CLAVE_AQUI|PLACEHOLDER)$/i.test(k)) {
-    return '';
+}
+
+function depurarJobsAudioAntiguos() {
+  if (jobsAudioMinuta.size <= 30) return;
+  const limite = Date.now() - 2 * 60 * 60 * 1000;
+  for (const [k, v] of jobsAudioMinuta.entries()) {
+    if ((v.estado === 'completado' || v.estado === 'error') && v.creadoEn < limite) {
+      jobsAudioMinuta.delete(k);
+    }
   }
-  return k;
+}
+
+function ejecutarProcesamientoAudioAsync(job: JobAudioMinuta, uploadPath: string) {
+  (async () => {
+    try {
+      const pagosHabilitados = isModelosPagosHabilitados();
+      const clienteAi = pagosHabilitados ? obtenerClienteGeminiActivo() : null;
+      const motorEfectivo: 'gratuito' | 'gemini' =
+        pagosHabilitados && job.motor === 'gemini' ? 'gemini' : 'gratuito';
+      const modeloElegido = job.modeloMinutaId
+        ? storeMinutas.minutas.find(m => m.id === job.modeloMinutaId) || null
+        : storeMinutas.minutas[0] || null;
+
+      const transRes = await transcribirAudioLargo({
+        inputPath: uploadPath,
+        originalName: job.nombre,
+        jobId: job.id,
+        aiFallback: clienteAi,
+        onProgress: (pct, detalle) => {
+          job.progreso = pct;
+          job.detalle = detalle;
+        },
+      });
+
+      const borradorRes = await generarBorradorMinutaDesdeTranscripcion({
+        transcripcionMarcaTiempo: transRes.transcripcionMarcaTiempo,
+        transcripcionLimpia: transRes.transcripcionLimpia,
+        minutaModelo: job.modeloMinutaId === '__NINGUNO__' ? null : modeloElegido,
+        codigo: job.codigo,
+        titulo: job.titulo,
+        fechaReunion: job.fechaReunion,
+        frente: job.frente,
+        participantes: job.participantes,
+        motor: motorEfectivo,
+        openRouterModel: getOpenRouterModeloPreferido(),
+        ai: clienteAi,
+        onProgress: (pct, detalle) => {
+          job.progreso = pct;
+          job.detalle = detalle;
+        },
+      });
+
+      job.estado = 'completado';
+      job.progreso = 100;
+      job.detalle = `Transcripción y borrador listos (${transRes.segmentosProcesados} tramo(s))`;
+      job.resultado = {
+        transcripcionMarcaTiempo: transRes.transcripcionMarcaTiempo,
+        transcripcionLimpia: transRes.transcripcionLimpia,
+        borradorMarkdown: borradorRes.borradorMarkdown,
+        segmentosProcesados: transRes.segmentosProcesados,
+        modeloTranscripcion: transRes.modeloTranscripcion,
+        fuenteRedaccion: borradorRes.fuenteRedaccion,
+        modeloReferenciaUsado: borradorRes.modeloReferenciaUsado,
+      };
+    } catch (err: any) {
+      console.error(`[AudioMinuta] Error procesando "${job.nombre}":`, err);
+      job.estado = 'error';
+      job.error = sanitizarErrorGroq(err?.message || 'Error transcribiendo o redactando el audio de reunión.');
+    } finally {
+      try {
+        if (fs.existsSync(uploadPath)) fs.unlinkSync(uploadPath);
+      } catch {}
+    }
+  })();
 }
 
 function inicializarGemini(): { client: GoogleGenAI | null; keySource: string | null } {
-  const claveApi = limpiarValorApiKey(process.env.API_KEY);
-  const claveGemini = limpiarValorApiKey(process.env.GEMINI_API_KEY);
-  const clavePrincipal = claveApi || claveGemini;
-
-  if (clavePrincipal) {
-    const fuente = claveApi ? 'API_KEY' : 'GEMINI_API_KEY';
-    try {
-      return {
-        client: new GoogleGenAI({
-          apiKey: clavePrincipal,
-          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-        }),
-        keySource: fuente,
-      };
-    } catch (err: any) {
-      ultimoErrorGemini = err?.message || String(err);
-      console.warn('[Gemini SDK] Inicialización con error:', err);
-    }
+  const candidatos = obtenerCandidatosApiKeys();
+  if (candidatos.length > 0) {
+    return {
+      client: candidatos[0].client,
+      keySource: candidatos[0].nombre,
+    };
   }
-
-  // Respaldo secundario si se guardó en otra variable estándar o con prefijo AIza
-  for (const [nombre, raw] of [
-    ['GOOGLE_API_KEY', process.env.GOOGLE_API_KEY],
-    ['VITE_GEMINI_API_KEY', process.env.VITE_GEMINI_API_KEY],
-    ...Object.entries(process.env),
-  ] as Array<[string, string | undefined]>) {
-    const cleaned = limpiarValorApiKey(raw);
-    if (cleaned.startsWith('AIza') && cleaned.length >= 30) {
-      try {
-        return {
-          client: new GoogleGenAI({
-            apiKey: cleaned,
-            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-          }),
-          keySource: nombre,
-        };
-      } catch (err: any) {
-        ultimoErrorGemini = err?.message || String(err);
-      }
-    }
-  }
-
   return { client: null, keySource: null };
 }
 
@@ -141,32 +313,12 @@ let ai: GoogleGenAI | null = initGemini.client;
 let geminiKeySource: string | null = initGemini.keySource;
 
 function obtenerClienteGeminiActivo(): GoogleGenAI | null {
-  if (!ai) {
-    const recarga = inicializarGemini();
-    if (recarga.client) {
-      ai = recarga.client;
-      geminiKeySource = recarga.keySource;
-    }
+  const recarga = inicializarGemini();
+  if (recarga.client) {
+    ai = recarga.client;
+    geminiKeySource = recarga.keySource;
   }
   return ai;
-}
-
-function formatearAvisoErrorGemini(err: any): string {
-  const raw = String(err?.message || err || 'Error desconocido');
-  const status = err?.status || err?.code || '';
-  const msg = raw.replace(/AIza[0-9A-Za-z_-]{20,}/g, '[KEY]');
-  ultimoErrorGemini = `${status ? `[${status}] ` : ''}${msg}`;
-
-  if (/API_KEY_INVALID|API key not valid|PERMISSION_DENIED|403|401/i.test(msg) || status === 403 || status === 401) {
-    return `> ⚠️ **Error de autenticación con Gemini (${status || '403'}):** La clave configurada en \`GEMINI_API_KEY\` fue rechazada por Google (\`API_KEY_INVALID\`). Verifica en **Settings > Secrets** que sea una clave válida de Google AI Studio (comienza con \`AIza...\`, sin espacios ni texto extra) y luego recarga la vista previa.\n\n`;
-  }
-  if (/RESOURCE_EXHAUSTED|429|quota/i.test(msg) || status === 429) {
-    return `> ⚠️ **Límite de cuota / RPM alcanzado en Gemini (429):** \`${msg.slice(0, 180)}\`.\n\n`;
-  }
-  if (/NOT_FOUND|404/i.test(msg) || status === 404) {
-    return `> ⚠️ **Modelo no disponible (404) para \`${GEMINI_MODEL}\`:** \`${msg.slice(0, 180)}\`.\n\n`;
-  }
-  return `> ⚠️ **Gemini no pudo responder esta consulta:** \`${msg.slice(0, 220)}\`\n\n`;
 }
 
 function obtenerAvisoSinClienteGemini(): string {
@@ -183,8 +335,18 @@ let pliegosIndexados: PliegoIndexado[] = cargarPliegosDesdeDisco();
 let planosComparador = cargarPlanosComparador();
 let chatAdjuntos: ChatAdjuntoIndexado[] = cargarChatAdjuntos();
 let storeMinutas = cargarStoreMinutas();
+let storeInterferencias = cargarStoreInterferencias();
+let storeNotasLibro: NotaLibro[] = recalcularHilosYRespuestas(cargarStoreNotasLibro());
+let storeDriveDocumentos: DriveDocumentoIndexado[] = cargarDriveDocumentosStore();
+let storeElencos: ElencosDriveState = cargarElencosDriveStore();
 if (pliegosIndexados.length > 0) {
   console.log(`[Pliegos] ${pliegosIndexados.length} pliego(s) restaurado(s) desde caché.`);
+}
+if (storeNotasLibro.length > 0) {
+  console.log(`[NotasLibro] ${storeNotasLibro.length} nota(s) de libro restaurada(s) desde caché.`);
+}
+if (storeDriveDocumentos.length > 0) {
+  console.log(`[DriveDocs] ${storeDriveDocumentos.length} documento(s) técnico(s) de Drive restaurado(s) desde caché.`);
 }
 
 function toPliegoResumenCliente(p: PliegoIndexado): PliegoReal {
@@ -245,7 +407,7 @@ app.post(
   express.raw({ type: '*/*', limit: '20mb' }),
   async (req, res) => {
     try {
-      const id = String(req.headers['x-pliego-id'] || `pliego_${Date.now()}`);
+      const id = sanitizeSafeId(String(req.headers['x-pliego-id'] || `pliego_${Date.now()}`), 'pliegoId');
       const destinoRaw = String(req.headers['x-upload-destino'] || 'pliego');
       const destino: DestinoSubida =
         destinoRaw === 'planoA' || destinoRaw === 'planoB' || destinoRaw === 'chatPdf'
@@ -326,8 +488,9 @@ app.post(
         totalPliegos: pliegosIndexados.length,
       });
     } catch (err: any) {
+      const status = err?.status === 400 ? 400 : 500;
       console.error('[Pliegos] Error en /api/pliegos/subir:', err);
-      res.status(500).json({ exito: false, error: err?.message || 'Error procesando archivo' });
+      res.status(status).json({ exito: false, error: err?.message || 'Error procesando archivo' });
     }
   }
 );
@@ -338,9 +501,9 @@ app.post(
   express.raw({ type: '*/*', limit: '20mb' }),
   (req, res) => {
     try {
-      const id = String(req.headers['x-pliego-id'] || '');
+      const id = sanitizeSafeId(String(req.headers['x-pliego-id'] || ''), 'pliegoId');
       const offset = Number(req.headers['x-chunk-offset'] || 0);
-      if (!id || Number.isNaN(offset) || offset < 0) {
+      if (Number.isNaN(offset) || offset < 0) {
         res.status(400).json({ exito: false, error: 'Encabezados de fragmento inválidos' });
         return;
       }
@@ -361,8 +524,9 @@ app.post(
 
       res.json({ exito: true, bytesEscritos: chunkBuf.length });
     } catch (err: any) {
+      const status = err?.status === 400 ? 400 : 500;
       console.error('[Pliegos] Error en /api/pliegos/subir/chunk:', err);
-      res.status(500).json({ exito: false, error: err?.message || 'Error escribiendo fragmento' });
+      res.status(status).json({ exito: false, error: err?.message || 'Error escribiendo fragmento' });
     }
   }
 );
@@ -445,17 +609,191 @@ app.post(
   }
 );
 
+// Subida directa de archivo de Nota de Libro (PDF / DOCX / TXT) con detección de actores y Q&A
+app.post(
+  '/api/notas-libro/subir',
+  express.raw({ type: '*/*', limit: '25mb' }),
+  async (req, res) => {
+    try {
+      const nombre = decodeURIComponent(String(req.headers['x-nota-nombre'] || 'nota_libro.pdf'));
+      const tipoMime = String(req.headers['x-nota-mime'] || 'application/pdf');
+
+      const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+      if (!buffer || buffer.length === 0) {
+        res.status(400).json({ exito: false, error: 'Archivo de nota vacío o no recibido.' });
+        return;
+      }
+
+      const clienteAi = obtenerClienteGeminiActivo();
+      let texto = await extraerTextoMinutaBuffer(buffer, nombre, tipoMime);
+
+      if (
+        isModelosPagosHabilitados() &&
+        (!texto || texto.trim().length < 25) &&
+        (tipoMime === 'application/pdf' || nombre.toLowerCase().endsWith('.pdf')) &&
+        clienteAi &&
+        buffer.length <= 18 * 1024 * 1024
+      ) {
+        try {
+          const { response: ocr } = await generarContenidoConFallback({
+            ai: clienteAi,
+            contents: [
+              {
+                inlineData: {
+                  mimeType: 'application/pdf',
+                  data: buffer.toString('base64'),
+                },
+              },
+              {
+                text: `Transcribe íntegramente esta nota del Libro de Comunicaciones ("${nombre}") incluyendo código, fecha, emisor, receptor, referencias, pedidos y respuestas.`,
+              },
+            ],
+            config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+            timeoutMs: 20000,
+          });
+          if (ocr.text?.trim()) texto = ocr.text.trim();
+        } catch {}
+      }
+
+      if (!texto || texto.trim().length < 5) {
+        res.status(422).json({
+          exito: false,
+          error: 'No se pudo extraer texto legible de la nota. Verifica que el PDF sea legible o pega el texto manualmente.',
+        });
+        return;
+      }
+
+      const notaId = `nl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const nuevaNota = await analizarNotaLibroConIA({
+        id: notaId,
+        nombreArchivo: nombre,
+        texto,
+        origen: 'archivo',
+        ai: clienteAi,
+        model: GEMINI_MODEL,
+      });
+
+      storeNotasLibro = recalcularHilosYRespuestas([nuevaNota, ...storeNotasLibro]);
+      guardarStoreNotasLibro(storeNotasLibro);
+
+      const notaFinal = storeNotasLibro.find(n => n.id === notaId) || nuevaNota;
+      res.json({
+        exito: true,
+        nota: notaFinal,
+        notasLibro: storeNotasLibro,
+      });
+    } catch (err: any) {
+      console.error('[NotasLibro] Error en /api/notas-libro/subir:', err);
+      res.status(500).json({ exito: false, error: err?.message || 'Error procesando nota de libro.' });
+    }
+  }
+);
+
+// Subida directa de audio de reunión chico (< 3.5 MB) con procesamiento asíncrono unificado
+app.post(
+  '/api/minutas/audio/subir-directo',
+  express.raw({ type: '*/*', limit: '20mb' }),
+  (req, res) => {
+    try {
+      depurarJobsAudioAntiguos();
+      const id = sanitizeSafeId(
+        String(req.headers['x-audio-id'] || `maud_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`),
+        'audioMinutaId'
+      );
+      const nombre = decodeAudioHeader(req.headers['x-audio-nombre'], 'reunion.webm');
+      const tipoMime = String(req.headers['x-audio-mime'] || 'audio/webm');
+      const motorRaw = String(req.headers['x-audio-motor'] || 'gratuito');
+
+      const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+      if (!buffer || buffer.length === 0) {
+        res.status(400).json({ exito: false, error: 'Archivo de audio vacío o no recibido.' });
+        return;
+      }
+
+      const uploadPath = getRutaAudioUploadTemp(id);
+      fs.writeFileSync(uploadPath, buffer);
+
+      const job: JobAudioMinuta = {
+        id,
+        nombre,
+        tipoMime,
+        totalBytes: buffer.length,
+        modeloMinutaId: decodeAudioHeader(req.headers['x-audio-modelo-id'], ''),
+        codigo: decodeAudioHeader(req.headers['x-audio-codigo'], ''),
+        titulo: decodeAudioHeader(req.headers['x-audio-titulo'], ''),
+        fechaReunion: decodeAudioHeader(req.headers['x-audio-fecha'], ''),
+        frente: decodeAudioHeader(req.headers['x-audio-frente'], ''),
+        participantes: decodeAudioHeader(req.headers['x-audio-participantes'], ''),
+        motor: isModelosPagosHabilitados() && motorRaw === 'gemini' ? 'gemini' : 'gratuito',
+        estado: 'procesando',
+        progreso: 5,
+        detalle: 'Audio recibido. Iniciando segmentación y transcripción...',
+        creadoEn: Date.now(),
+      };
+      jobsAudioMinuta.set(id, job);
+      ejecutarProcesamientoAudioAsync(job, uploadPath);
+
+      res.json({ exito: true, jobId: id });
+    } catch (err: any) {
+      const status = err?.status === 400 ? 400 : 500;
+      res.status(status).json({
+        exito: false,
+        error: sanitizarErrorGroq(err?.message || 'Error recibiendo audio de minuta.'),
+      });
+    }
+  }
+);
+
+// Recepción de fragmentos binarios (~4 MB) para audios largos (hasta 2+ horas / 250 MB)
+app.post(
+  '/api/minutas/audio/subir/chunk',
+  express.raw({ type: '*/*', limit: '20mb' }),
+  (req, res) => {
+    try {
+      const id = sanitizeSafeId(String(req.headers['x-audio-id'] || ''), 'audioMinutaId');
+      const offset = Number(req.headers['x-chunk-offset'] || 0);
+      if (Number.isNaN(offset) || offset < 0) {
+        res.status(400).json({ exito: false, error: 'Encabezados de fragmento de audio inválidos.' });
+        return;
+      }
+
+      const partPath = getRutaAudioStaging(id);
+      if (!fs.existsSync(partPath)) {
+        res.status(404).json({ exito: false, error: 'Sesión de subida de audio no inicializada.' });
+        return;
+      }
+
+      const chunkBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+      const fd = fs.openSync(partPath, 'r+');
+      try {
+        fs.writeSync(fd, chunkBuf, 0, chunkBuf.length, offset);
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      res.json({ exito: true, bytesEscritos: chunkBuf.length });
+    } catch (err: any) {
+      const status = err?.status === 400 ? 400 : 500;
+      res.status(status).json({
+        exito: false,
+        error: sanitizarErrorGroq(err?.message || 'Error guardando fragmento de audio.'),
+      });
+    }
+  }
+);
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Inicializar sesión de subida fragmentada para archivos pesados (pliegos o planos CAD PDF)
 app.post('/api/pliegos/subir/init', (req, res) => {
   try {
-    const { id, nombre, tipoMime, totalBytes, fechaSubida, destino } = req.body || {};
-    if (!id || !nombre) {
+    const { id: rawId, nombre, tipoMime, totalBytes, fechaSubida, destino } = req.body || {};
+    if (!rawId || !nombre) {
       res.status(400).json({ exito: false, error: 'Datos de inicialización incompletos' });
       return;
     }
+    const id = sanitizeSafeId(rawId, 'pliegoId');
 
     const dest: DestinoSubida =
       destino === 'planoA' || destino === 'planoB' || destino === 'chatPdf' ? destino : 'pliego';
@@ -477,7 +815,8 @@ app.post('/api/pliegos/subir/init', (req, res) => {
 
     res.json({ exito: true, id });
   } catch (err: any) {
-    res.status(500).json({ exito: false, error: err?.message || 'Error inicializando subida' });
+    const status = err?.status === 400 ? 400 : 500;
+    res.status(status).json({ exito: false, error: err?.message || 'Error inicializando subida' });
   }
 });
 
@@ -627,11 +966,57 @@ app.get('/api/chat/adjuntos', (_req, res) => {
   });
 });
 
+app.post('/api/chat/adjuntos/hidratar', (req, res) => {
+  try {
+    const incoming = Array.isArray(req.body?.adjuntos) ? req.body.adjuntos : [];
+    const byId = new Map<string, ChatAdjuntoIndexado>();
+    for (const a of chatAdjuntos) {
+      byId.set(a.id, a);
+    }
+    for (const item of incoming) {
+      if (!item?.id || !item?.nombre) continue;
+      const safeId = sanitizeSafeId(String(item.id), 'adjuntoId');
+      if (!byId.has(safeId)) {
+        const adj: ChatAdjuntoIndexado = {
+          id: safeId,
+          nombre: String(item.nombre),
+          tipoMime: String(item.tipoMime || 'application/pdf'),
+          tamanioBytes: Number(item.tamanioBytes || 0),
+          tamanioTexto: String(item.tamanioTexto || '0 KB'),
+          fechaSubida: String(item.fechaSubida || ''),
+          contenidoTexto: String(item.contenidoTexto || ''),
+          paginas: Number(item.paginas || 1),
+          caracteresTexto: Number(item.caracteresTexto || (item.contenidoTexto || '').length),
+          esEscaneado: Boolean(item.esEscaneado),
+          tiempoProcesoMs: Number(item.tiempoProcesoMs || 0),
+          metricasDetectadas: Array.isArray(item.metricasDetectadas) ? item.metricasDetectadas : [],
+        };
+        byId.set(safeId, adj);
+        guardarChatAdjunto(adj);
+      }
+    }
+    chatAdjuntos = Array.from(byId.values());
+    res.json({
+      exito: true,
+      total: chatAdjuntos.length,
+      adjuntos: chatAdjuntos.map(toChatAdjuntoCliente),
+    });
+  } catch (err: any) {
+    const status = err?.status === 400 ? 400 : 500;
+    res.status(status).json({ exito: false, error: err?.message || 'Error hidratando adjuntos.' });
+  }
+});
+
 app.delete('/api/chat/adjuntos/:id', (req, res) => {
-  const { id } = req.params;
-  chatAdjuntos = chatAdjuntos.filter(a => a.id !== id);
-  eliminarChatAdjuntoDisco(id);
-  res.json({ exito: true, totalRestantes: chatAdjuntos.length });
+  try {
+    const safeId = sanitizeSafeId(req.params.id, 'adjuntoId');
+    chatAdjuntos = chatAdjuntos.filter(a => a.id !== safeId);
+    eliminarChatAdjuntoDisco(safeId);
+    res.json({ exito: true, totalRestantes: chatAdjuntos.length });
+  } catch (err: any) {
+    const status = err?.status === 400 ? 400 : 500;
+    res.status(status).json({ exito: false, error: err?.message || 'ID de adjunto inválido' });
+  }
 });
 
 app.post('/api/chat/adjuntos/limpiar', (_req, res) => {
@@ -641,49 +1026,104 @@ app.post('/api/chat/adjuntos/limpiar', (_req, res) => {
 });
 
 // Endpoints del Comparador de Planos PDF
-app.get('/api/comparador/planos', (_req, res) => {
+app.get('/api/comparador/planos', (req, res) => {
+  const esMaestro = esUsuarioMaestroRequest(req);
+  const info = getLastWorkingGeminiInfo({ esMaestro });
   res.json({
     exito: true,
     planoA: toPlanoComparadorCliente(planosComparador.A),
     planoB: toPlanoComparadorCliente(planosComparador.B),
-    tieneGeminiKey: Boolean(ai),
-    modelo: GEMINI_MODEL,
-    ultimoErrorGemini,
+    tieneGeminiKey: isModelosPagosHabilitados() && Boolean(obtenerClienteGeminiActivo()),
+    modelo: info.modelo || OPENROUTER_FREE_MODEL,
+    modelosDisponibles: info.modelosTextoDisponibles,
+    modeloPreferido: info.modeloPreferido,
+    ultimoErrorGemini: isModelosPagosHabilitados() ? getUltimoErrorGemini() : null,
   });
 });
 
-function sanitizarTextoError(raw: unknown): string {
-  return String(raw || 'Error desconocido').replace(/AIza[0-9A-Za-z_-]{16,}/g, '[KEY]');
-}
+app.get('/api/gemini/config', async (req, res) => {
+  await refrescarModelosGratuitosOpenRouter(false);
+  const esMaestro = esUsuarioMaestroRequest(req);
+  res.json({
+    exito: true,
+    ...getLastWorkingGeminiInfo({ esMaestro }),
+  });
+});
 
-function inspeccionarVariableClave(nombre: string, raw?: string) {
-  const trimmed = (raw || '')
-    .trim()
-    .replace(/^(GEMINI_API_KEY|API_KEY)\s*=/i, '')
-    .replace(/^['"]+|['"]+$/g, '')
-    .trim();
-  const definida = trimmed.length > 0;
-  const esPlantilla = /MY_GEMINI_API_KEY/i.test(trimmed) || /^(YOUR_API_KEY|TU_CLAVE_AQUI|PLACEHOLDER)$/i.test(trimmed);
-  let vistaSegura = '(no definida)';
-  if (definida) {
-    if (esPlantilla) {
-      vistaSegura = `${trimmed} (ignorada por ser plantilla)`;
-    } else if (trimmed.length >= 12) {
-      vistaSegura = `${trimmed.slice(0, 4)}...${trimmed.slice(-4)} (${trimmed.length} chars)`;
-    } else {
-      vistaSegura = `*** (${trimmed.length} chars)`;
-    }
+app.post('/api/gemini/config', (req, res) => {
+  const esMaestro = esUsuarioMaestroRequest(req);
+  const {
+    nivelPreferido,
+    modeloPreferido,
+    politicaLimite,
+    openRouterModeloPreferido,
+    limitesPorModelo,
+  } = req.body || {};
+
+  const nivelStr = typeof nivelPreferido === 'string' ? nivelPreferido.trim() : undefined;
+  if (
+    !isModelosPagosHabilitados() &&
+    !esMaestro &&
+    nivelStr &&
+    nivelStr !== 'gratuito'
+  ) {
+    res.status(403).json({
+      exito: false,
+      error: 'Los modelos pagos están desactivados por el administrador maestro.',
+      ...getLastWorkingGeminiInfo({ esMaestro }),
+    });
+    return;
   }
-  return {
-    nombre,
-    definida,
-    validaParaUso: definida && !esPlantilla,
-    longitud: trimmed.length,
-    esPlantilla,
-    vistaSegura,
-    valorLimpio: esPlantilla ? '' : trimmed,
-  };
-}
+
+  updateGeminiPrecisionConfig({
+    nivelPreferido: nivelStr,
+    modeloPreferido: typeof modeloPreferido === 'string' ? modeloPreferido.trim() : undefined,
+    politicaLimite: typeof politicaLimite === 'string' ? politicaLimite.trim() : undefined,
+    openRouterModeloPreferido:
+      typeof openRouterModeloPreferido === 'string' ? openRouterModeloPreferido.trim() : undefined,
+    limitesPorModelo:
+      limitesPorModelo && typeof limitesPorModelo === 'object' ? limitesPorModelo : undefined,
+  });
+  res.json({
+    exito: true,
+    ...getLastWorkingGeminiInfo({ esMaestro }),
+  });
+});
+
+app.post('/api/gemini/master-control', (req, res) => {
+  if (!esUsuarioMaestroRequest(req)) {
+    res.status(403).json({
+      exito: false,
+      error: `Solo el administrador maestro (${MASTER_ADMIN_EMAIL}) puede habilitar o deshabilitar los modelos pagos.`,
+    });
+    return;
+  }
+
+  const habilitado = req.body?.modelosPagosHabilitados;
+  if (typeof habilitado !== 'boolean') {
+    res.status(400).json({
+      exito: false,
+      error: 'El parámetro booleano modelosPagosHabilitados es obligatorio.',
+    });
+    return;
+  }
+
+  setModelosPagosHabilitados(habilitado, { esMaestro: true });
+  res.json({
+    exito: true,
+    ...getLastWorkingGeminiInfo({ esMaestro: true }),
+  });
+});
+
+app.post('/api/gemini/reset-uso', (req, res) => {
+  const esMaestro = esUsuarioMaestroRequest(req);
+  const { modelo } = req.body || {};
+  resetGeminiUsoDiario(typeof modelo === 'string' ? modelo.trim() : undefined);
+  res.json({
+    exito: true,
+    ...getLastWorkingGeminiInfo({ esMaestro }),
+  });
+});
 
 function obtenerEstadoProceso() {
   return {
@@ -693,8 +1133,8 @@ function obtenerEstadoProceso() {
     uptimeSegundos: Math.round(process.uptime()),
     nodeEnv: process.env.NODE_ENV || 'no definido',
     puerto: PORT,
-    clienteSdkInicializado: Boolean(ai),
-    fuenteClienteActivo: geminiKeySource,
+    clienteSdkInicializado: isModelosPagosHabilitados() ? Boolean(obtenerClienteGeminiActivo()) : false,
+    fuenteClienteActivo: isModelosPagosHabilitados() ? geminiKeySource : 'OPENROUTER_FREE',
     pliegosEnMemoria: pliegosIndexados.length,
     timestamp: new Date().toISOString(),
   };
@@ -702,170 +1142,249 @@ function obtenerEstadoProceso() {
 
 async function ejecutarDiagnosticoGemini(_req: express.Request, res: express.Response) {
   const t0 = Date.now();
-  const recarga = inicializarGemini();
-  if (recarga.client) {
-    ai = recarga.client;
-    geminiKeySource = recarga.keySource;
+  const pagosHabilitados = isModelosPagosHabilitados();
+  if (pagosHabilitados) {
+    const recarga = inicializarGemini();
+    if (recarga.client) {
+      ai = recarga.client;
+      geminiKeySource = recarga.keySource;
+    }
   }
 
-  const infoApiKey = inspeccionarVariableClave('API_KEY', process.env.API_KEY);
-  const infoGeminiKey = inspeccionarVariableClave('GEMINI_API_KEY', process.env.GEMINI_API_KEY);
-  const infoGoogleKey = inspeccionarVariableClave('GOOGLE_API_KEY', process.env.GOOGLE_API_KEY);
-  const infoViteKey = inspeccionarVariableClave('VITE_GEMINI_API_KEY', process.env.VITE_GEMINI_API_KEY);
+  const {
+    variablesEntorno,
+    infoApiKey,
+    infoGeminiKey,
+    infoGoogleKey,
+    hayPlantillaIgnorada,
+  } = obtenerResumenVariablesEntorno();
 
-  const variablesEntorno = {
-    API_KEY: {
-      definida: infoApiKey.definida,
-      longitud: infoApiKey.longitud,
-      esPlantilla: infoApiKey.esPlantilla,
-      vistaSegura: infoApiKey.vistaSegura,
-    },
-    GEMINI_API_KEY: {
-      definida: infoGeminiKey.definida,
-      longitud: infoGeminiKey.longitud,
-      esPlantilla: infoGeminiKey.esPlantilla,
-      vistaSegura: infoGeminiKey.vistaSegura,
-    },
-    GOOGLE_API_KEY: {
-      definida: infoGoogleKey.definida,
-      longitud: infoGoogleKey.longitud,
-      esPlantilla: infoGoogleKey.esPlantilla,
-      vistaSegura: infoGoogleKey.vistaSegura,
-    },
-    VITE_GEMINI_API_KEY: {
-      definida: infoViteKey.definida,
-      longitud: infoViteKey.longitud,
-      esPlantilla: infoViteKey.esPlantilla,
-      vistaSegura: infoViteKey.vistaSegura,
-    },
-  };
+  const openRouterEnv = obtenerResumenOpenRouterEnv();
+  const openRouterKeys = obtenerCandidatosOpenRouterKeys();
+  const candidatosKeys = pagosHabilitados ? obtenerCandidatosApiKeys() : [];
+  const candidatoPrincipal = pagosHabilitados
+    ? infoApiKey.validaParaUso
+      ? infoApiKey
+      : infoGeminiKey.validaParaUso
+        ? infoGeminiKey
+        : infoGoogleKey.validaParaUso
+          ? infoGoogleKey
+          : null
+    : null;
 
-  // Orden exacto solicitado: process.env.API_KEY || process.env.GEMINI_API_KEY (ignorando MY_GEMINI_API_KEY)
-  const candidatoPrincipal = infoApiKey.validaParaUso
-    ? infoApiKey
-    : infoGeminiKey.validaParaUso
-      ? infoGeminiKey
-      : infoGoogleKey.validaParaUso
-        ? infoGoogleKey
-        : null;
+  const partesVarDetectada = candidatosKeys.map(c => `${c.nombre} (${c.vistaSegura})`);
+  if (openRouterEnv.configurado) {
+    partesVarDetectada.push(`${openRouterEnv.nombreVariable} (${openRouterEnv.vistaSegura})`);
+  }
 
-  const hayPlantillaIgnorada = infoApiKey.esPlantilla || infoGeminiKey.esPlantilla;
-
-  const variableDetectada = candidatoPrincipal
-    ? `${candidatoPrincipal.nombre} (${candidatoPrincipal.vistaSegura})`
-    : infoGeminiKey.esPlantilla
-      ? `GEMINI_API_KEY (${infoGeminiKey.vistaSegura})`
-      : infoApiKey.esPlantilla
-        ? `API_KEY (${infoApiKey.vistaSegura})`
-        : 'Ninguna definida';
+  const variableDetectada =
+    partesVarDetectada.length > 0
+      ? partesVarDetectada.join(' · ')
+      : !pagosHabilitados
+        ? 'Solo modo gratuito (OPENROUTER_API_KEY / GROQ_API_KEY no detectadas)'
+        : infoGeminiKey.esPlantilla
+          ? `GEMINI_API_KEY (${infoGeminiKey.vistaSegura})`
+          : infoApiKey.esPlantilla
+            ? `API_KEY (${infoApiKey.vistaSegura})`
+            : 'Ninguna definida';
 
   const estadoProceso = obtenerEstadoProceso();
+  const modeloPreferido = getPreferredGeminiModel();
+  const modelosDisponibles = pagosHabilitados
+    ? [...DEFAULT_TEXT_MODELS, OPENROUTER_FREE_MODEL]
+    : [OPENROUTER_FREE_MODEL];
 
-  if (!candidatoPrincipal) {
+  if (candidatosKeys.length === 0 && !candidatoPrincipal && openRouterKeys.length === 0) {
     res.json({
       ok: false,
-      estado: hayPlantillaIgnorada ? 'PLANTILLA_NO_REEMPLAZADA' : 'CLAVE_AUSENTE',
+      estado: !pagosHabilitados
+        ? 'SOLO_GRATUITO_SIN_CLAVE_OPENROUTER'
+        : hayPlantillaIgnorada
+          ? 'PLANTILLA_NO_REEMPLAZADA'
+          : 'CLAVE_AUSENTE',
       codigoHttp: null,
-      modelo: GEMINI_MODEL,
+      modelo: pagosHabilitados ? GEMINI_MODEL : OPENROUTER_FREE_MODEL,
+      modeloPreferido,
+      modelosDisponibles,
+      resultadosPorModelo: [] as IntentoModeloResultado[],
       variableDetectada,
       latenciaMs: Date.now() - t0,
       estadoProceso,
-      variablesEntorno,
+      variablesEntorno: {
+        ...(pagosHabilitados ? variablesEntorno : {}),
+        OPENROUTER_API_KEY: {
+          definida: openRouterEnv.configurado,
+          longitud: openRouterEnv.configurado ? 1 : 0,
+          esPlantilla: false,
+          vistaSegura: openRouterEnv.vistaSegura,
+        },
+      },
       errorTecnico: {
-        nombre: hayPlantillaIgnorada ? 'PlaceholderApiKeyIgnored' : 'MissingApiKeyError',
+        nombre: hayPlantillaIgnorada && pagosHabilitados ? 'PlaceholderApiKeyIgnored' : 'MissingApiKeyError',
         codigoHttp: null,
-        statusText: hayPlantillaIgnorada ? 'PLACEHOLDER_KEY_IGNORED' : 'ENV_VAR_MISSING',
-        mensaje: hayPlantillaIgnorada
-          ? 'Se ignoró el valor de plantilla MY_GEMINI_API_KEY y no existe otra clave válida en process.env.API_KEY ni process.env.GEMINI_API_KEY.'
-          : 'No se encontró ninguna clave válida en process.env.API_KEY ni en process.env.GEMINI_API_KEY.',
+        statusText: !pagosHabilitados ? 'OPENROUTER_KEY_MISSING' : 'ENV_VAR_MISSING',
+        mensaje: !pagosHabilitados
+          ? 'Modo gratuito activo: no se detectó OPENROUTER_API_KEY en el servidor.'
+          : 'No se encontró ninguna clave válida en API_KEY, GEMINI_API_KEY ni OPENROUTER_API_KEY.',
         causa: null,
         pingEjecutado: false,
         stackResumen: null,
       },
-      detalle: hayPlantillaIgnorada
-        ? 'Se detectó e ignoró MY_GEMINI_API_KEY en el entorno del contenedor y tampoco hay clave en process.env.API_KEY. Guarda tu clave real en Settings > Secrets y recarga/republica el entorno.'
-        : 'No se encontró ninguna clave en process.env.API_KEY ni en process.env.GEMINI_API_KEY. Configúrala en Settings > Secrets y recarga el entorno.',
+      detalle: !pagosHabilitados
+        ? 'El sistema opera exclusivamente en modo gratuito ($0). Configura OPENROUTER_API_KEY en Settings > Secrets para probar el motor OpenRouter :free.'
+        : 'No se encontró ninguna clave en API_KEY, GEMINI_API_KEY ni OPENROUTER_API_KEY. Configúrala en Settings > Secrets y recarga el entorno.',
     });
     return;
   }
 
-  try {
-    const pingClient = new GoogleGenAI({
-      apiKey: candidatoPrincipal.valorLimpio,
-      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-    });
+  // Probar TODOS los modelos habilitados en vivo (Gemini solo si modelosPagosHabilitados === true + OpenRouter :free)
+  const resultadosPorModelo: IntentoModeloResultado[] = [];
+  let ganador: IntentoModeloResultado | null = null;
+  let ultimoErrObj: any = null;
 
-    const respuesta = await pingClient.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: 'Responde únicamente con la palabra: OK',
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      },
-    });
+  if (pagosHabilitados) {
+    for (const kc of candidatosKeys) {
+      for (const modeloTest of DEFAULT_TEXT_MODELS) {
+        const mT0 = Date.now();
+        try {
+          const resp = await kc.client.models.generateContent({
+            model: modeloTest,
+            contents: 'Responde únicamente con la palabra: OK',
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            },
+          });
+          const txt = (resp.text || '').trim();
+          const item: IntentoModeloResultado = {
+            modelo: modeloTest,
+            fuenteClave: kc.nombre,
+            ok: true,
+            codigoHttp: 200,
+            estado: 'CONECTADA',
+            latenciaMs: Date.now() - mT0,
+            respuestaModelo: txt.slice(0, 60) || '(sin texto)',
+          };
+          resultadosPorModelo.push(item);
+          if (!ganador) ganador = item;
+        } catch (err: any) {
+          ultimoErrObj = err;
+          const infoErr = clasificarErrorGemini(err);
+          resultadosPorModelo.push({
+            modelo: modeloTest,
+            fuenteClave: kc.nombre,
+            ok: false,
+            codigoHttp: infoErr.codigoHttp,
+            estado: infoErr.estado,
+            latenciaMs: Date.now() - mT0,
+            detalleError: infoErr.mensaje.slice(0, 300),
+          });
+        }
+      }
+    }
+  }
 
-    const texto = (respuesta.text || '').trim();
-    ultimoErrorGemini = null;
+  if (openRouterKeys.length > 0) {
+    const orModel = getOpenRouterModeloPreferido();
+    const orT0 = Date.now();
+    try {
+      const orPing = await generarChatOpenRouter({
+        parts: [{ text: 'Responde únicamente con la palabra: OK' }],
+        systemInstruction: 'Responde únicamente con OK.',
+        model: orModel,
+        timeoutMs: 15000,
+      });
+      const itemOr: IntentoModeloResultado = {
+        modelo: orPing.modelUsed || orModel,
+        fuenteClave: orPing.keySourceUsed,
+        ok: true,
+        codigoHttp: 200,
+        estado: 'CONECTADA',
+        latenciaMs: Date.now() - orT0,
+        respuestaModelo: orPing.texto.slice(0, 60) || 'OK',
+      };
+      resultadosPorModelo.push(itemOr);
+      if (!ganador) ganador = itemOr;
+    } catch (errOr: any) {
+      ultimoErrObj = ultimoErrObj || errOr;
+      const infoOr = clasificarErrorOpenRouter(
+        typeof errOr?.status === 'number' ? errOr.status : null,
+        errOr?.message || String(errOr)
+      );
+      resultadosPorModelo.push({
+        modelo: orModel,
+        fuenteClave: openRouterKeys[0].nombre,
+        ok: false,
+        codigoHttp: infoOr.codigoHttp,
+        estado: infoOr.estado,
+        latenciaMs: Date.now() - orT0,
+        detalleError: infoOr.mensaje.slice(0, 300),
+      });
+    }
+  }
+
+  if (ganador) {
+    clearUltimoErrorGemini();
+    const fallidos = resultadosPorModelo.filter(r => !r.ok);
+    const notaParcial =
+      fallidos.length > 0
+        ? ` (${fallidos.map(f => `${f.modelo}: ${f.estado} ${f.codigoHttp || ''}`).join('; ')}; conmutación automática activa hacia ${ganador.modelo}).`
+        : '';
 
     res.json({
       ok: true,
       estado: 'CONECTADA',
       codigoHttp: 200,
-      modelo: GEMINI_MODEL,
+      modelo: ganador.modelo,
+      modeloPreferido,
+      modelosDisponibles,
+      resultadosPorModelo,
       variableDetectada,
       latenciaMs: Date.now() - t0,
-      respuestaModelo: texto.slice(0, 60) || '(sin texto)',
+      respuestaModelo: ganador.respuestaModelo,
       estadoProceso: obtenerEstadoProceso(),
       variablesEntorno,
       errorTecnico: null,
-      detalle: `Ping exitoso y conexión verificada con ${GEMINI_MODEL} usando ${candidatoPrincipal.nombre}.`,
+      detalle: `Conexión verificada con ${ganador.modelo} usando ${ganador.fuenteClave}.${notaParcial}`,
     });
-  } catch (err: any) {
-    const cleanMsg = sanitizarTextoError(err?.message || err);
-    const status = err?.status || err?.code || null;
-    const statusText = err?.statusText || null;
-    const causa = err?.cause ? sanitizarTextoError(err.cause?.message || err.cause) : null;
-    const stackResumen = typeof err?.stack === 'string'
-      ? sanitizarTextoError(err.stack.split('\n').slice(0, 3).join(' | '))
-      : null;
-
-    ultimoErrorGemini = `${status ? `[${status}] ` : ''}${cleanMsg}`;
-
-    let estado = 'ERROR_CONEXION';
-    if (candidatoPrincipal.esPlantilla) {
-      estado = 'PLANTILLA_NO_REEMPLAZADA';
-    } else if (/API_KEY_INVALID|API key not valid/i.test(cleanMsg)) {
-      estado = 'CLAVE_INVALIDA';
-    } else if (/PERMISSION_DENIED|403|401/i.test(cleanMsg) || status === 403 || status === 401) {
-      estado = 'PERMISO_DENEGADO';
-    } else if (/RESOURCE_EXHAUSTED|429|quota/i.test(cleanMsg) || status === 429) {
-      estado = 'CUOTA_EXCEDIDA';
-    } else if (/NOT_FOUND|404/i.test(cleanMsg) || status === 404) {
-      estado = 'MODELO_NO_ENCONTRADO';
-    }
-
-    res.json({
-      ok: false,
-      estado,
-      codigoHttp: status,
-      modelo: GEMINI_MODEL,
-      variableDetectada,
-      latenciaMs: Date.now() - t0,
-      estadoProceso,
-      variablesEntorno,
-      errorTecnico: {
-        nombre: err?.name || 'Error',
-        codigoHttp: status,
-        statusText,
-        mensaje: cleanMsg.slice(0, 500),
-        causa,
-        pingEjecutado: true,
-        stackResumen,
-      },
-      detalle: candidatoPrincipal.esPlantilla
-        ? `Ping ejecutado con ${candidatoPrincipal.nombre}=${candidatoPrincipal.vistaSegura}, rechazado por la API (${cleanMsg.slice(0, 220)}). Verifica Settings > Secrets y recarga/republica el entorno.`
-        : cleanMsg.slice(0, 400),
-    });
+    return;
   }
+
+  const ultimoResultado = resultadosPorModelo[resultadosPorModelo.length - 1];
+  const infoUltimo = clasificarErrorGemini(ultimoErrObj);
+  setUltimoErrorGemini(
+    `${infoUltimo.codigoHttp ? `[${infoUltimo.codigoHttp}] ` : ''}${infoUltimo.mensaje}`
+  );
+
+  const es402Todos = resultadosPorModelo.some(r => r.estado === 'CREDITOS_AGOTADOS');
+
+  res.json({
+    ok: false,
+    estado: es402Todos ? 'CREDITOS_AGOTADOS' : ultimoResultado?.estado || infoUltimo.estado,
+    codigoHttp: ultimoResultado?.codigoHttp ?? infoUltimo.codigoHttp,
+    modelo: modelosDisponibles.join(' · '),
+    modeloPreferido,
+    modelosDisponibles,
+    resultadosPorModelo,
+    variableDetectada,
+    latenciaMs: Date.now() - t0,
+    estadoProceso,
+    variablesEntorno,
+    errorTecnico: {
+      nombre: ultimoErrObj?.name || 'Error',
+      codigoHttp: infoUltimo.codigoHttp,
+      statusText: ultimoErrObj?.statusText || null,
+      mensaje: infoUltimo.mensaje.slice(0, 500),
+      causa: ultimoErrObj?.cause ? sanitizarTextoError(ultimoErrObj.cause?.message || ultimoErrObj.cause) : null,
+      pingEjecutado: true,
+      stackResumen:
+        typeof ultimoErrObj?.stack === 'string'
+          ? sanitizarTextoError(ultimoErrObj.stack.split('\n').slice(0, 3).join(' | '))
+          : null,
+    },
+    detalle: es402Todos
+      ? `Se probaron todos los modelos configurados (${modelosDisponibles.join(', ')}), pero la clave activa devolvió HTTP 402 (créditos prepagos agotados en Google AI Studio). Recarga saldo en https://ai.studio/projects o configura otra clave con cuota disponible en Settings > Secrets (GEMINI_API_KEY).`
+      : infoUltimo.mensaje.slice(0, 400),
+  });
 }
 
 // Diagnóstico / ping real a Google Gemini API (GET y POST para uso desde navegador, curl o UI)
@@ -914,11 +1433,11 @@ app.post('/api/comparador/analizar/stream', async (req, res) => {
     });
 
     let avisoErrorGemini = '';
-    const clienteAi = obtenerClienteGeminiActivo();
+    const clienteAi = isModelosPagosHabilitados() ? obtenerClienteGeminiActivo() : null;
     if (clienteAi) {
       try {
-        const stream = await clienteAi.models.generateContentStream({
-          model: GEMINI_MODEL,
+        const { stream, modelUsed } = await generarStreamConFallback({
+          ai: clienteAi,
           contents: { parts },
           config: {
             thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
@@ -938,8 +1457,8 @@ app.post('/api/comparador/analizar/stream', async (req, res) => {
           }
         }
         if (huboTexto) {
-          ultimoErrorGemini = null;
-          enviar({ done: true, fuente: 'gemini-3.8-flash-multimodal' });
+          clearUltimoErrorGemini();
+          enviar({ done: true, fuente: `${modelUsed}-multimodal` });
           res.end();
           return;
         }
@@ -947,7 +1466,7 @@ app.post('/api/comparador/analizar/stream', async (req, res) => {
         console.warn('[Comparador Gemini Error]:', geminiErr?.message || geminiErr);
         avisoErrorGemini = formatearAvisoErrorGemini(geminiErr);
       }
-    } else {
+    } else if (isModelosPagosHabilitados()) {
       avisoErrorGemini = obtenerAvisoSinClienteGemini();
     }
 
@@ -974,6 +1493,27 @@ app.get('/api/pliegos', (_req, res) => {
   });
 });
 
+// 1b. Obtener texto completo de un pliego indexado para sincronización completa en Firestore
+app.get('/api/pliegos/:id/texto', (req, res) => {
+  try {
+    const safeId = sanitizeSafeId(req.params.id, 'pliegoId');
+    const encontrado = pliegosIndexados.find(p => p.id === safeId);
+    if (!encontrado) {
+      res.status(404).json({ exito: false, error: 'Pliego no encontrado en caché del servidor' });
+      return;
+    }
+    res.json({
+      exito: true,
+      id: encontrado.id,
+      contenidoTexto: encontrado.contenidoTexto || '',
+      caracteresTexto: encontrado.caracteresTexto || (encontrado.contenidoTexto || '').length,
+    });
+  } catch (err: any) {
+    const status = err?.status === 400 ? 400 : 500;
+    res.status(status).json({ exito: false, error: err?.message || 'Error obteniendo texto del pliego' });
+  }
+});
+
 // 2. Cargar un pliego por texto pegado o JSON (compatibilidad)
 app.post('/api/pliegos/cargar', async (req, res) => {
   try {
@@ -982,12 +1522,13 @@ app.post('/api/pliegos/cargar', async (req, res) => {
       res.status(400).json({ exito: false, error: 'Datos de pliego inválidos' });
       return;
     }
+    const safeId = sanitizeSafeId(pliego.id || `pliego_${Date.now()}`, 'pliegoId');
 
     let indexado: PliegoIndexado;
     if (pliego.dataBase64) {
       const buffer = Buffer.from(pliego.dataBase64, 'base64');
       indexado = await procesarArchivoPliego({
-        id: pliego.id,
+        id: safeId,
         nombre: pliego.nombre,
         tipoMime: pliego.tipoMime,
         buffer,
@@ -998,7 +1539,7 @@ app.post('/api/pliegos/cargar', async (req, res) => {
       }
     } else {
       indexado = procesarTextoPliego({
-        id: pliego.id,
+        id: safeId,
         nombre: pliego.nombre,
         contenidoTexto: pliego.contenidoTexto || '',
         fechaSubida: pliego.fechaSubida,
@@ -1014,16 +1555,22 @@ app.post('/api/pliegos/cargar', async (req, res) => {
       totalPliegos: pliegosIndexados.length,
     });
   } catch (err: any) {
-    res.status(500).json({ exito: false, error: err?.message || 'Error al guardar pliego' });
+    const status = err?.status === 400 ? 400 : 500;
+    res.status(status).json({ exito: false, error: err?.message || 'Error al guardar pliego' });
   }
 });
 
 // 3. Eliminar un pliego real
 app.delete('/api/pliegos/:id', (req, res) => {
-  const { id } = req.params;
-  pliegosIndexados = pliegosIndexados.filter(p => p.id !== id);
-  eliminarPliegoDeDisco(id);
-  res.json({ exito: true, totalRestantes: pliegosIndexados.length });
+  try {
+    const safeId = sanitizeSafeId(req.params.id, 'pliegoId');
+    pliegosIndexados = pliegosIndexados.filter(p => p.id !== safeId);
+    eliminarPliegoDeDisco(safeId);
+    res.json({ exito: true, totalRestantes: pliegosIndexados.length });
+  } catch (err: any) {
+    const status = err?.status === 400 ? 400 : 500;
+    res.status(status).json({ exito: false, error: err?.message || 'ID de pliego inválido' });
+  }
 });
 
 // 4. Limpiar todos los pliegos reales
@@ -1031,6 +1578,474 @@ app.post('/api/pliegos/limpiar', (_req, res) => {
   pliegosIndexados = [];
   limpiarPliegosDeDisco();
   res.json({ exito: true, mensaje: 'Pliegos limpiados en el servidor' });
+});
+
+// =========================================================================================
+// ENDPOINTS DE DOCUMENTOS TÉCNICOS DE GOOGLE DRIVE (MEMORIAS DESCRIPTIVAS, ESTUDIOS, ETC.)
+// =========================================================================================
+
+app.get('/api/drive-docs', (_req, res) => {
+  res.json({
+    exito: true,
+    total: storeDriveDocumentos.length,
+    docs: storeDriveDocumentos.map(d => ({
+      id: d.id,
+      driveFileId: d.driveFileId,
+      nombre: d.nombre,
+      rutaCarpeta: d.rutaCarpeta,
+      driveUrl: d.driveUrl,
+      paginas: d.paginas,
+      caracteresTexto: d.caracteresTexto,
+      fechaSubida: d.fechaSubida,
+    })),
+  });
+});
+
+app.post('/api/drive-docs/sincronizar', async (req, res) => {
+  try {
+    const authHeader = String(req.headers.authorization || '');
+    const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+    if (!accessToken) {
+      res.status(401).json({
+        exito: false,
+        error: 'Se requiere iniciar sesión con Google Drive para indexar Memorias Descriptivas y documentos técnicos.',
+      });
+      return;
+    }
+
+    const folderId =
+      typeof req.body?.folderId === 'string' && req.body.folderId.trim()
+        ? req.body.folderId.trim()
+        : DEFAULT_DRIVE_ROOT_FOLDER_ID;
+    const maxNuevos =
+      typeof req.body?.maxNuevos === 'number' && req.body.maxNuevos > 0
+        ? Math.min(30, req.body.maxNuevos)
+        : 15;
+
+    const resultado = await sincronizarDocsTecnicosDriveCarpeta({
+      accessToken,
+      folderId,
+      ai: obtenerClienteGeminiActivo(),
+      storeActual: storeDriveDocumentos,
+      maxNuevos,
+    });
+
+    storeDriveDocumentos = resultado.storeActualizado;
+
+    res.json({
+      exito: true,
+      totalIndexados: resultado.totalIndexados,
+      nuevos: resultado.nuevos,
+      omitidosExistentes: resultado.omitidosExistentes,
+      nombresNuevos: resultado.nombresNuevos,
+      docs: storeDriveDocumentos.map(d => ({
+        id: d.id,
+        driveFileId: d.driveFileId,
+        nombre: d.nombre,
+        rutaCarpeta: d.rutaCarpeta,
+        driveUrl: d.driveUrl,
+        paginas: d.paginas,
+        caracteresTexto: d.caracteresTexto,
+        fechaSubida: d.fechaSubida,
+      })),
+    });
+  } catch (err: any) {
+    const status = err?.status === 401 ? 401 : 500;
+    res.status(status).json({
+      exito: false,
+      error: err?.message || 'Error indexando documentos técnicos desde Google Drive.',
+    });
+  }
+});
+
+app.post('/api/drive/verificar', async (req, res) => {
+  try {
+    const authHeader = String(req.headers.authorization || '');
+    const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+    if (!accessToken) {
+      res.status(401).json({
+        exito: false,
+        conectado: false,
+        permisoLecturaDrive: false,
+        error: 'No hay un token activo de Google Drive para verificar.',
+      });
+      return;
+    }
+
+    const folderId =
+      typeof req.body?.folderId === 'string' && req.body.folderId.trim()
+        ? req.body.folderId.trim()
+        : DEFAULT_DRIVE_ROOT_FOLDER_ID;
+
+    const diag = await verificarConexionDrive({
+      accessToken,
+      folderId,
+      elencosFolderId: DEFAULT_ELENCOS_FOLDER_ID,
+    });
+
+    if (!diag.permisoLecturaDrive) {
+      res.status(403).json({
+        exito: false,
+        ...diag,
+        error: diag.sugerencia || 'Falta permiso de lectura de Google Drive (drive.readonly).',
+      });
+      return;
+    }
+
+    res.json({
+      exito: true,
+      ...diag,
+    });
+  } catch (err: any) {
+    const httpStatus = Number(err?.status) === 401 ? 401 : Number(err?.status) === 403 ? 403 : 500;
+    res.status(httpStatus).json({
+      exito: false,
+      conectado: false,
+      permisoLecturaDrive: httpStatus !== 403,
+      error: err?.message || 'No se pudo verificar la conexión con Google Drive.',
+    });
+  }
+});
+
+// =========================================================================================
+// ENDPOINTS DE ELENCOS OFICIALES (SEGUIMIENTO DE ELENCOS / CARPETA DRIVE)
+// =========================================================================================
+
+app.get('/api/elencos', (_req, res) => {
+  res.json({
+    exito: true,
+    ...storeElencos,
+  });
+});
+
+app.post('/api/elencos/sincronizar-drive', async (req, res) => {
+  try {
+    const authHeader = String(req.headers.authorization || '');
+    const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+    if (!accessToken) {
+      res.status(401).json({
+        exito: false,
+        error: 'Se requiere conectar Google Drive para leer la carpeta de Elencos y la hoja de Seguimiento.',
+      });
+      return;
+    }
+
+    const folderId =
+      typeof req.body?.folderId === 'string' && req.body.folderId.trim()
+        ? req.body.folderId.trim()
+        : DEFAULT_ELENCOS_FOLDER_ID;
+
+    const resultado = await sincronizarElencosDesdeGoogleDrive({
+      accessToken,
+      folderId,
+      rootFolderId: DEFAULT_DRIVE_ROOT_FOLDER_ID,
+      ai: obtenerClienteGeminiActivo(),
+    });
+
+    storeElencos = resultado;
+    res.json({
+      exito: true,
+      ...storeElencos,
+    });
+  } catch (err: any) {
+    const status = err?.status === 401 ? 401 : err?.status === 403 ? 403 : 500;
+    const msg =
+      status === 401
+        ? 'Tu sesión de Google Drive expiró. Vuelve a conectar Google Drive e intenta nuevamente.'
+        : err?.message || 'Error leyendo carpeta de Elencos desde Google Drive.';
+    res.status(status).json({ exito: false, error: msg });
+  }
+});
+
+// =========================================================================================
+// ENDPOINTS DE INTERFERENCIAS Y CRUCES REALES DESDE GOOGLE DRIVE
+// =========================================================================================
+
+app.get('/api/interferencias', (_req, res) => {
+  res.json({
+    exito: true,
+    interferencias: storeInterferencias,
+  });
+});
+
+app.post('/api/interferencias/hidratar', (req, res) => {
+  try {
+    const incoming = Array.isArray(req.body?.interferencias)
+      ? (req.body.interferencias as Interferencia[])
+      : [];
+    const MOCK_IDS = new Set(['INT-1', 'INT-2', 'INT-3', 'INT-4', 'INT-5']);
+    const merged = new Map<string, Interferencia>();
+
+    for (const existing of storeInterferencias) {
+      if (existing?.id && !MOCK_IDS.has(existing.id)) {
+        merged.set(existing.id, existing);
+      }
+    }
+    for (const item of incoming) {
+      const key = item?.id || item?.carpetaDriveId || item?.empresa;
+      if (!key || (item.id && MOCK_IDS.has(item.id))) continue;
+      merged.set(key, item);
+    }
+
+    storeInterferencias = Array.from(merged.values());
+    guardarStoreInterferencias(storeInterferencias);
+
+    res.json({
+      exito: true,
+      total: storeInterferencias.length,
+      interferencias: storeInterferencias,
+    });
+  } catch (err: any) {
+    res.status(500).json({ exito: false, error: err?.message || 'Error hidratando interferencias.' });
+  }
+});
+
+app.post('/api/interferencias/sincronizar-drive', async (req, res) => {
+  try {
+    const authHeader = String(req.headers.authorization || '');
+    const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+    if (!accessToken) {
+      res.status(401).json({
+        exito: false,
+        error: 'Se requiere iniciar sesión con Google para leer la carpeta "interferencias" en Google Drive.',
+      });
+      return;
+    }
+
+    const { folderId, forzarRelectura = false } = req.body || {};
+    const clienteAi = obtenerClienteGeminiActivo();
+
+    const syncRes = await sincronizarInterferenciasDesdeGoogleDrive({
+      accessToken,
+      folderId: folderId ? String(folderId).trim() : DEFAULT_DRIVE_ROOT_FOLDER_ID,
+      interferenciasExistentes: storeInterferencias,
+      forzarRelectura: Boolean(forzarRelectura),
+      ai: clienteAi,
+      model: GEMINI_MODEL,
+    });
+
+    storeInterferencias = syncRes.interferencias;
+    guardarStoreInterferencias(storeInterferencias);
+
+    res.json({
+      exito: true,
+      ...syncRes,
+    });
+  } catch (err: any) {
+    const status = err?.status === 401 || err?.status === 403 ? err.status : 500;
+    console.error('[DriveInterferencias] Error sincronizando desde Drive:', err);
+    res.status(status).json({
+      exito: false,
+      error:
+        status === 401
+          ? 'Tu sesión de Google Drive expiró. Vuelve a conectar Google Drive e intenta nuevamente.'
+          : err?.message || 'Error leyendo carpeta interferencias desde Google Drive.',
+    });
+  }
+});
+
+// =========================================================================================
+// ENDPOINTS DE LIBRO DE COMUNICACIONES / NOTAS DE LIBRO (ACTORES Y PREGUNTAS/RESPUESTAS)
+// =========================================================================================
+
+app.get('/api/notas-libro', (_req, res) => {
+  res.json({
+    exito: true,
+    notasLibro: storeNotasLibro,
+    total: storeNotasLibro.length,
+  });
+});
+
+app.post('/api/notas-libro/sincronizar-drive', async (req, res) => {
+  try {
+    const authHeader = String(req.headers.authorization || '');
+    const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+    if (!accessToken) {
+      res.status(401).json({
+        exito: false,
+        error: 'Se requiere iniciar sesión con Google para leer las Notas de Libro desde Google Drive.',
+      });
+      return;
+    }
+
+    const { folderId, forzarRelectura = false, continuarLote = false } = req.body || {};
+    const clienteAi = obtenerClienteGeminiActivo();
+
+    const syncRes = await sincronizarNotasLibroDesdeGoogleDrive({
+      accessToken,
+      folderId: folderId ? String(folderId).trim() : DEFAULT_DRIVE_ROOT_FOLDER_ID,
+      notasExistentes: storeNotasLibro,
+      forzarRelectura: Boolean(forzarRelectura),
+      continuarLote: Boolean(continuarLote),
+      ai: clienteAi,
+      model: GEMINI_MODEL,
+    });
+
+    storeNotasLibro = syncRes.notasLibro;
+    guardarStoreNotasLibro(storeNotasLibro);
+
+    res.json({
+      exito: true,
+      ...syncRes,
+    });
+  } catch (err: any) {
+    const status = err?.status === 401 || err?.status === 403 ? err.status : 500;
+    console.error('[DriveNotasLibro] Error sincronizando desde Drive:', err);
+    res.status(status).json({
+      exito: false,
+      error:
+        status === 401
+          ? 'Tu sesión de Google Drive expiró. Vuelve a conectar Google Drive e intenta nuevamente.'
+          : err?.message || 'Error leyendo Notas de Libro desde Google Drive.',
+    });
+  }
+});
+
+app.post('/api/notas-libro/registrar', async (req, res) => {
+  try {
+    const { nombreArchivo, titulo, contenidoTexto } = req.body || {};
+    const texto = String(contenidoTexto || '').trim();
+    if (!texto) {
+      res.status(400).json({ exito: false, error: 'El contenido de la nota es obligatorio.' });
+      return;
+    }
+
+    const clienteAi = obtenerClienteGeminiActivo();
+    const notaId = `nl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const procesada = await analizarNotaLibroConIA({
+      id: notaId,
+      nombreArchivo: String(nombreArchivo || titulo || 'Nota_Libro_Manual.txt'),
+      texto,
+      origen: 'texto',
+      ai: clienteAi,
+      model: GEMINI_MODEL,
+    });
+
+    storeNotasLibro = recalcularHilosYRespuestas([procesada, ...storeNotasLibro]);
+    guardarStoreNotasLibro(storeNotasLibro);
+
+    const notaFinal = storeNotasLibro.find(n => n.id === notaId) || procesada;
+    res.json({ exito: true, nota: notaFinal, notasLibro: storeNotasLibro });
+  } catch (err: any) {
+    res.status(500).json({ exito: false, error: err?.message || 'Error registrando nota.' });
+  }
+});
+
+app.post('/api/notas-libro/hidratar', (req, res) => {
+  try {
+    const compact = req.body?.compact === true || req.query?.compact === '1';
+    const incoming = Array.isArray(req.body?.notasLibro) ? (req.body.notasLibro as NotaLibro[]) : [];
+    if (incoming.length === 0) {
+      res.json(
+        compact
+          ? { exito: true, total: storeNotasLibro.length }
+          : { exito: true, total: storeNotasLibro.length, notasLibro: storeNotasLibro }
+      );
+      return;
+    }
+
+    const merged = new Map<string, NotaLibro>();
+    for (const existing of storeNotasLibro) {
+      if (existing?.id) merged.set(existing.id, existing);
+    }
+    for (const item of incoming) {
+      if (item?.id) merged.set(item.id, item);
+    }
+
+    storeNotasLibro = recalcularHilosYRespuestas(Array.from(merged.values()));
+    guardarStoreNotasLibro(storeNotasLibro);
+
+    res.json(
+      compact
+        ? { exito: true, total: storeNotasLibro.length }
+        : {
+            exito: true,
+            total: storeNotasLibro.length,
+            notasLibro: storeNotasLibro,
+          }
+    );
+  } catch (err: any) {
+    res.status(500).json({ exito: false, error: err?.message || 'Error hidratando notas de libro.' });
+  }
+});
+
+app.patch('/api/notas-libro/:id', (req, res) => {
+  const { id } = req.params;
+  const idx = storeNotasLibro.findIndex(n => n.id === id);
+  if (idx === -1) {
+    res.status(404).json({ exito: false, error: 'Nota de libro no encontrada.' });
+    return;
+  }
+
+  const actual = storeNotasLibro[idx];
+  const body = req.body || {};
+
+  const emisorActualizado: ActorNotaLibro =
+    body.actorEmisor !== undefined ? normalizarActorNota(String(body.actorEmisor)) : actual.actorEmisor;
+  const receptorActualizado: ActorNotaLibro =
+    body.actorReceptor !== undefined ? normalizarActorNota(String(body.actorReceptor)) : actual.actorReceptor;
+
+  const estadoVal = body.estadoRespuesta as EstadoRespuestaNota | undefined;
+  const estadoActualizado: EstadoRespuestaNota =
+    estadoVal &&
+    ['CONTESTADA', 'PARCIALMENTE_CONTESTADA', 'SIN_RESPUESTA', 'CON_DISCREPANCIA', 'INFORMATIVA'].includes(estadoVal)
+      ? estadoVal
+      : actual.estadoRespuesta;
+
+  const sentidoVal = body.sentido as SentidoNotaLibro | undefined;
+  const sentidoActualizado: SentidoNotaLibro =
+    sentidoVal &&
+    ['pregunta_solicitud', 'respuesta_devolucion', 'intimacion_observacion', 'informativa'].includes(sentidoVal)
+      ? sentidoVal
+      : actual.sentido;
+
+  const actualizada: NotaLibro = {
+    ...actual,
+    ...(body.codigo !== undefined ? { codigo: canonicalizarCodigoNota(String(body.codigo)) || actual.codigo } : {}),
+    ...(body.tipoNota !== undefined ? { tipoNota: normalizarTipoNota(String(body.tipoNota)) } : {}),
+    actorEmisor: emisorActualizado,
+    emisorDetalle:
+      body.emisorDetalle !== undefined ? String(body.emisorDetalle).trim().slice(0, 190) : actual.emisorDetalle,
+    actorReceptor: receptorActualizado,
+    receptorDetalle:
+      body.receptorDetalle !== undefined ? String(body.receptorDetalle).trim().slice(0, 190) : actual.receptorDetalle,
+    sentido: sentidoActualizado,
+    estadoRespuesta: estadoActualizado,
+    ...(Array.isArray(body.referenciasNotas)
+      ? {
+          referenciasNotas: body.referenciasNotas
+            .map((r: any) => canonicalizarCodigoNota(String(r)))
+            .filter(Boolean)
+            .slice(0, 35),
+        }
+      : {}),
+    ...(body.resumen !== undefined ? { resumen: String(body.resumen).trim().slice(0, 3500) } : {}),
+    manualOverride: true,
+  };
+
+  const reemplazo = storeNotasLibro.map((n, i) => (i === idx ? actualizada : n));
+  storeNotasLibro = recalcularHilosYRespuestas(reemplazo);
+  guardarStoreNotasLibro(storeNotasLibro);
+
+  const notaFinal = storeNotasLibro.find(n => n.id === id) || actualizada;
+  res.json({
+    exito: true,
+    nota: notaFinal,
+    notasLibro: storeNotasLibro,
+  });
+});
+
+app.delete('/api/notas-libro/:id', (req, res) => {
+  const { id } = req.params;
+  storeNotasLibro = recalcularHilosYRespuestas(storeNotasLibro.filter(n => n.id !== id));
+  guardarStoreNotasLibro(storeNotasLibro);
+  res.json({ exito: true, notasLibro: storeNotasLibro });
+});
+
+app.post('/api/notas-libro/limpiar', (_req, res) => {
+  storeNotasLibro = [];
+  guardarStoreNotasLibro(storeNotasLibro);
+  res.json({ exito: true });
 });
 
 // =========================================================================================
@@ -1044,6 +2059,173 @@ app.get('/api/minutas', (_req, res) => {
     compromisos: storeMinutas.compromisos,
     notasPedido: storeMinutas.notasPedido,
   });
+});
+
+app.get('/api/minutas/audio/config', (_req, res) => {
+  const groqEnv = obtenerResumenGroqEnv();
+  res.json({
+    exito: true,
+    groqConfigurado: tieneGroqConfigurado(),
+    groqFuente: groqEnv.fuente,
+    groqVistaSegura: groqEnv.vistaSegura,
+    openRouterConfigurado: tieneOpenRouterConfigurado(),
+    geminiConfigurado: isModelosPagosHabilitados() && Boolean(obtenerClienteGeminiActivo()),
+  });
+});
+
+app.post('/api/minutas/audio/subir/init', (req, res) => {
+  try {
+    depurarJobsAudioAntiguos();
+    const {
+      id: rawId,
+      nombre,
+      tipoMime,
+      totalBytes,
+      modeloMinutaId,
+      codigo,
+      titulo,
+      fechaReunion,
+      frente,
+      participantes,
+      motor,
+    } = req.body || {};
+
+    const bytesNum = Number(totalBytes) || 0;
+    if (!rawId || !nombre) {
+      res.status(400).json({ exito: false, error: 'Datos de inicialización de audio incompletos.' });
+      return;
+    }
+    if (bytesNum > MAX_AUDIO_MINUTA_BYTES) {
+      res.status(400).json({
+        exito: false,
+        error: 'El archivo de audio supera el máximo permitido (250 MB). Comprímelo o divídelo antes de subir.',
+      });
+      return;
+    }
+
+    const id = sanitizeSafeId(rawId, 'audioMinutaId');
+    const partPath = getRutaAudioStaging(id);
+    fs.writeFileSync(partPath, Buffer.alloc(0));
+
+    jobsAudioMinuta.set(id, {
+      id,
+      nombre: String(nombre),
+      tipoMime: String(tipoMime || 'audio/webm'),
+      totalBytes: bytesNum,
+      modeloMinutaId: typeof modeloMinutaId === 'string' ? modeloMinutaId : undefined,
+      codigo: typeof codigo === 'string' ? codigo : undefined,
+      titulo: typeof titulo === 'string' ? titulo : undefined,
+      fechaReunion: typeof fechaReunion === 'string' ? fechaReunion : undefined,
+      frente: typeof frente === 'string' ? frente : undefined,
+      participantes: typeof participantes === 'string' ? participantes : undefined,
+      motor: isModelosPagosHabilitados() && motor === 'gemini' ? 'gemini' : 'gratuito',
+      estado: 'subiendo',
+      progreso: 0,
+      detalle: 'Preparando subida por partes de audio...',
+      creadoEn: Date.now(),
+    });
+
+    res.json({ exito: true, id });
+  } catch (err: any) {
+    const status = err?.status === 400 ? 400 : 500;
+    res.status(status).json({
+      exito: false,
+      error: sanitizarErrorGroq(err?.message || 'Error inicializando subida de audio.'),
+    });
+  }
+});
+
+app.post('/api/minutas/audio/subir/finalizar', (req, res) => {
+  try {
+    const rawId = req.body?.id;
+    const id = sanitizeSafeId(rawId, 'audioMinutaId');
+    const job = jobsAudioMinuta.get(id);
+    const partPath = getRutaAudioStaging(id);
+
+    if (!job || !fs.existsSync(partPath)) {
+      res.status(404).json({ exito: false, error: 'Sesión de audio en progreso no encontrada.' });
+      return;
+    }
+
+    const uploadPath = getRutaAudioUploadTemp(id);
+    if (fs.existsSync(uploadPath)) fs.unlinkSync(uploadPath);
+    fs.renameSync(partPath, uploadPath);
+
+    job.estado = 'procesando';
+    job.progreso = 4;
+    job.detalle = 'Audio completo recibido. Iniciando segmentación para Groq Whisper...';
+    ejecutarProcesamientoAudioAsync(job, uploadPath);
+
+    res.json({ exito: true, jobId: id });
+  } catch (err: any) {
+    const status = err?.status === 400 ? 400 : 500;
+    res.status(status).json({
+      exito: false,
+      error: sanitizarErrorGroq(err?.message || 'Error finalizando subida de audio.'),
+    });
+  }
+});
+
+app.get('/api/minutas/audio/estado/:id', (req, res) => {
+  try {
+    const id = sanitizeSafeId(req.params.id, 'audioMinutaId');
+    const job = jobsAudioMinuta.get(id);
+    if (!job) {
+      res.status(404).json({ exito: false, error: 'Trabajo de transcripción de audio no encontrado.' });
+      return;
+    }
+    res.json({
+      exito: true,
+      estado: job.estado,
+      progreso: job.progreso,
+      detalle: job.detalle,
+      resultado: job.resultado,
+      error: job.error,
+    });
+  } catch (err: any) {
+    res.status(err?.status === 400 ? 400 : 500).json({
+      exito: false,
+      error: sanitizarErrorGroq(err?.message || 'Identificador inválido.'),
+    });
+  }
+});
+
+app.post('/api/minutas/hidratar', (req, res) => {
+  try {
+    const incomingMinutas = Array.isArray(req.body?.minutas) ? (req.body.minutas as MinutaReunion[]) : [];
+    const incomingCompromisos = Array.isArray(req.body?.compromisos)
+      ? (req.body.compromisos as CompromisoMinuta[])
+      : [];
+    const incomingNotasPedido = Array.isArray(req.body?.notasPedido)
+      ? (req.body.notasPedido as NotaPedidoIngenieria[])
+      : [];
+
+    const mMap = new Map<string, MinutaReunion>();
+    for (const m of storeMinutas.minutas) if (m?.id) mMap.set(m.id, m);
+    for (const m of incomingMinutas) if (m?.id) mMap.set(m.id, m);
+
+    const cMap = new Map<string, CompromisoMinuta>();
+    for (const c of storeMinutas.compromisos) if (c?.id) cMap.set(c.id, c);
+    for (const c of incomingCompromisos) if (c?.id) cMap.set(c.id, c);
+
+    const npMap = new Map<string, NotaPedidoIngenieria>();
+    for (const n of storeMinutas.notasPedido) if (n?.id) npMap.set(n.id, n);
+    for (const n of incomingNotasPedido) if (n?.id) npMap.set(n.id, n);
+
+    storeMinutas = {
+      minutas: Array.from(mMap.values()),
+      compromisos: Array.from(cMap.values()),
+      notasPedido: Array.from(npMap.values()),
+    };
+    guardarStoreMinutas(storeMinutas);
+
+    res.json({
+      exito: true,
+      ...storeMinutas,
+    });
+  } catch (err: any) {
+    res.status(500).json({ exito: false, error: err?.message || 'Error hidratando minutas.' });
+  }
 });
 
 app.post('/api/minutas/sincronizar-drive', async (req, res) => {
@@ -1404,17 +2586,585 @@ app.delete('/api/minutas/notas-pedido/:id', (req, res) => {
   res.json({ exito: true });
 });
 
+// =========================================================================================
+// ENDPOINTS GEMINI REALES PARA INFORMES Y ANOTADOR DE CAMPO (AUDITORÍA, AUDIO Y FOTOS)
+// =========================================================================================
+
+app.post('/api/informes/generar', async (req, res) => {
+  try {
+    const {
+      solicitud = 'Informe Ejecutivo Semanal de Estado General',
+      planos = [],
+      totalPlanificados = storeElencos.totalPlanificados || 543,
+      hitos = [],
+      interferencias = [],
+      notasCampo = '',
+      fotosCount = 0,
+      audiosCount = 0,
+    } = req.body || {};
+
+    const planosList = Array.isArray(planos) ? planos : [];
+    const hitosList = Array.isArray(hitos) ? hitos : [];
+    const interfList =
+      Array.isArray(interferencias) && interferencias.length > 0 ? interferencias : storeInterferencias;
+
+    const totalEmitidos = planosList.length;
+    const totalApc = planosList.filter((p: any) => Boolean(p?.selloApc)).length;
+    const fechasCandidatas: string[] = [];
+    for (const p of planosList) {
+      const f = String(p?.fechaDocumento || p?.fechaSubida || p?.fecha || '').slice(0, 10);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(f)) fechasCandidatas.push(f);
+    }
+    for (const m of storeMinutas.minutas) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(m.fechaReunion)) fechasCandidatas.push(m.fechaReunion);
+    }
+    for (const n of storeNotasLibro) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(n.fecha)) fechasCandidatas.push(n.fecha);
+    }
+    fechasCandidatas.sort();
+    const fechaInicioObra = fechasCandidatas[0] || new Date().toISOString().slice(0, 10);
+    const fechaHoy = new Date().toISOString().slice(0, 10);
+
+    const resumenHitos = hitosList
+      .slice(0, 15)
+      .map((h: any) => `- [${h.codigo}] ${h.nombre} | Frente: ${h.frente} | Fecha Obj.: ${h.fechaObjetivo}`)
+      .join('\n');
+
+    const resumenInterf = interfList
+      .slice(0, 20)
+      .map(
+        (c: any) =>
+          `- **${c.empresa}** (${c.carpetaNombre || c.empresa}): Estado **${c.estadoTramite}** | Vanos: ${c.vanosAfectados || '-'} | Faltantes: ${(c.faltantes || []).join('; ') || 'Ninguno'} | Docs leídos: ${(c.documentosLeidos || [c.archivoSolicitudNombre]).filter(Boolean).join(', ')}`
+      )
+      .join('\n');
+
+    const incumplidos = storeMinutas.compromisos.filter(c => c.estado === 'INCUMPLIDO');
+    const notasSinResp = storeNotasLibro.filter(
+      n => n.estadoRespuesta === 'SIN_RESPUESTA' || n.estadoRespuesta === 'CON_DISCREPANCIA'
+    );
+
+    const resumenNotasLibro = storeNotasLibro
+      .slice(0, 20)
+      .map(
+        n =>
+          `- [${n.codigo} | ${n.fecha}] ${n.actorEmisor} ➔ ${n.actorReceptor} | Estado: ${n.estadoRespuesta} | Respuesta por: ${n.respondidaPorNotas.join(', ') || 'NINGUNA'} | ${n.resumen.slice(0, 180)}`
+      )
+      .join('\n');
+
+    const clienteAi = isModelosPagosHabilitados() ? obtenerClienteGeminiActivo() : null;
+    if (clienteAi || (!isModelosPagosHabilitados() && tieneOpenRouterConfigurado())) {
+      try {
+        const prompt =
+          `Genera un INFORME TÉCNICO EJECUTIVO riguroso en Markdown para la obra de Alta Tensión 132 kV.\n` +
+          `Tipo de informe solicitado: "${solicitud}"\n` +
+          `Fecha de emisión: ${fechaHoy} | Registro documental más antiguo detectado: ${fechaInicioObra}\n\n` +
+          `=== MÉTRICAS REALES DEL PROYECTO ===\n` +
+          `- Planos planificados totales: ${totalPlanificados}\n` +
+          `- Planos emitidos en catálogo: ${totalEmitidos} (${totalPlanificados > 0 ? ((totalEmitidos / totalPlanificados) * 100).toFixed(1) : '0.0'}%)\n` +
+          `- Planos con Sello APC (Apto Para Construcción): ${totalApc} (${totalPlanificados > 0 ? ((totalApc / totalPlanificados) * 100).toFixed(1) : '0.0'}%)\n` +
+          `- Pliegos contractuales reales indexados: ${pliegosIndexados.map(p => `${p.nombre} (${p.paginas} págs)`).join(', ') || 'Ninguno'}\n` +
+          `- Hitos contractuales activos (${hitosList.length}):\n${resumenHitos || 'Sin hitos cargados'}\n\n` +
+          `- Interferencias y Cruces reales de Drive (${interfList.length}):\n${resumenInterf || 'Sin interferencias sincronizadas'}\n\n` +
+          `- Libro de Comunicaciones (${storeNotasLibro.length} notas, ${notasSinResp.length} pendientes/con discrepancia):\n${resumenNotasLibro || 'Sin notas de libro cargadas'}\n\n` +
+          `- Minutas y Compromisos (${storeMinutas.minutas.length} minutas, ${storeMinutas.compromisos.length} compromisos, ${incumplidos.length} incumplidos, ${storeMinutas.notasPedido.length} Notas de Pedido generadas).\n` +
+          `- Relevamiento de Campo: ${fotosCount} fotos, ${audiosCount} audios.\n` +
+          (notasCampo ? `Notas recientes de campo:\n${String(notasCampo).slice(0, 3500)}\n\n` : '') +
+          `Estructura solicitada: Título claro, Resumen Ejecutivo con tabla de KPIs, Estado de Ingeniería y Planos APC, Seguimiento de Hitos Críticos, Gestión de Cruces/Interferencias reales (sin inventar datos), Estado de Notas de Libro y Compromisos de Minuta, y Plan de Acción Inmediato. No inventes datos fuera de las métricas aportadas.`;
+
+        const { response: resp, modelUsed } = await generarContenidoConFallback({
+          ai: clienteAi,
+          contents: prompt,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+            systemInstruction:
+              'Eres un Director Técnico y Jefe de Ingeniería Eléctrica 132 kV redactando informes gerenciales y contractuales reales en español.',
+          },
+          timeoutMs: 30000,
+        });
+
+        if (resp.text?.trim()) {
+          clearUltimoErrorGemini();
+          res.json({
+            exito: true,
+            fuente: modelUsed,
+            markdown: resp.text.trim(),
+          });
+          return;
+        }
+      } catch (err: any) {
+        console.warn('[Informes] Fallback estructurado:', err?.message || err);
+        formatearAvisoErrorGemini(err);
+      }
+    }
+
+    const fallbackMd =
+      `# ${solicitud}\n\n` +
+      `**Fecha de emisión:** ${fechaHoy} | **Primer registro documental:** ${fechaInicioObra}\n\n` +
+      `## 1. Resumen Ejecutivo de Ingeniería\n\n` +
+      `| Indicador | Valor Real | Porcentaje |\n|---|---|---|\n` +
+      `| Planos Planificados | ${totalPlanificados} | 100% |\n` +
+      `| Planos Emitidos en Catálogo | ${totalEmitidos} | ${totalPlanificados > 0 ? ((totalEmitidos / totalPlanificados) * 100).toFixed(1) : '0.0'}% |\n` +
+      `| Planos con Sello APC | ${totalApc} | ${totalPlanificados > 0 ? ((totalApc / totalPlanificados) * 100).toFixed(1) : '0.0'}% |\n` +
+      `| Cruces / Interferencias Activas | ${interfList.length} | - |\n` +
+      `| Notas de Libro Indexadas | ${storeNotasLibro.length} (${notasSinResp.length} pendientes/discrepancias) | - |\n` +
+      `| Compromisos de Minuta Incumplidos | ${incumplidos.length} de ${storeMinutas.compromisos.length} | - |\n\n` +
+      `## 2. Estado de Interferencias y Cruces Reales\n\n` +
+      (resumenInterf || '- Sin cruces sincronizados desde Google Drive.') +
+      `\n\n## 3. Hitos Contractuales\n\n` +
+      (resumenHitos || '- Sin hitos registrados.') +
+      `\n\n## 4. Seguimiento de Notas de Libro y Campo\n\n` +
+      (resumenNotasLibro || '- Sin notas de libro cargadas.') +
+      (notasCampo ? `\n\n### Notas de Inspección de Campo (${fotosCount} fotos, ${audiosCount} audios)\n${String(notasCampo).slice(0, 2000)}` : '');
+
+    res.json({
+      exito: true,
+      fuente: 'datos-vivos-locales',
+      markdown: fallbackMd,
+    });
+  } catch (err: any) {
+    res.status(500).json({ exito: false, error: err?.message || 'Error generando informe.' });
+  }
+});
+
+app.post('/api/anotador/auditar', async (req, res) => {
+  try {
+    const { consulta, frente = 'Obra General 132 kV', planosMencionados = [] } = req.body || {};
+    const queryStr = String(consulta || '').trim();
+    if (!queryStr) {
+      res.status(400).json({ exito: false, error: 'La consulta técnica es obligatoria.' });
+      return;
+    }
+
+    const recuperado =
+      pliegosIndexados.length > 0 ? recuperarFragmentosRelevantes(queryStr, pliegosIndexados, 45000) : null;
+    const localRef = buscarYExtraerDePliegosReales(queryStr, pliegosIndexados);
+
+    const clienteAi = isModelosPagosHabilitados() ? obtenerClienteGeminiActivo() : null;
+    if (clienteAi || (!isModelosPagosHabilitados() && tieneOpenRouterConfigurado())) {
+      try {
+        const { response: resp, modelUsed } = await generarContenidoConFallback({
+          ai: clienteAi,
+          contents: [
+            {
+              text:
+                `Eres un Inspector Jefe de Obra Eléctrica 132 kV realizando una auditoría de campo.\n` +
+                `Frente de trabajo: ${frente}\n` +
+                `Consulta / verificación solicitada: "${queryStr}"\n` +
+                (Array.isArray(planosMencionados) && planosMencionados.length > 0
+                  ? `Planos disponibles relacionados:\n${planosMencionados.slice(0, 12).map((p: any) => `- ${p.codigo} Rev.${p.revision} (${p.selloApc ? 'APC' : p.estado || 'Sin APC'}): ${p.descripcion}`).join('\n')}\n\n`
+                  : '') +
+                (recuperado?.contextoTexto
+                  ? `=== EXTRACTOS REALES DE PLIEGOS INDEXADOS ===\n${recuperado.contextoTexto.slice(0, 35000)}\n\n`
+                  : `=== BASE DE REFERENCIA ===\n${localRef.resumen}\n`) +
+                `Devuelve un dictamen técnico estructurado en JSON con rigor contractual.`,
+            },
+          ],
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                titulo: { type: Type.STRING, description: 'Título técnico de la verificación o rubro auditado.' },
+                exigenciaPliego: {
+                  type: Type.STRING,
+                  description: 'Exigencia exacta del Pliego (valores, tolerancias, normas IRAM/AEA/CIRSOC, hormigón, Rpat, etc.).',
+                },
+                planoApc: {
+                  type: Type.STRING,
+                  description: 'Plano APC o código de ingeniería vigente de referencia.',
+                },
+                secuenciaInspeccion: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: 'Lista de 4 a 6 puntos de chequeo físico e instrumental antes de liberar en campo.',
+                },
+                referencias: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: 'Pliegos, artículos, páginas o notas citadas.',
+                },
+              },
+              required: ['titulo', 'exigenciaPliego', 'planoApc', 'secuenciaInspeccion', 'referencias'],
+            },
+          },
+          timeoutMs: 25000,
+        });
+
+        const rawJson = (resp.text || '').trim();
+        if (rawJson) {
+          const parsed = JSON.parse(rawJson);
+          clearUltimoErrorGemini();
+          res.json({
+            exito: true,
+            fuente: modelUsed,
+            dictamen: {
+              titulo: String(parsed.titulo || `Auditoría: ${queryStr}`).trim(),
+              exigenciaPliego: String(parsed.exigenciaPliego || localRef.resumen).trim(),
+              planoApc: String(parsed.planoApc || 'Verificar plano APC vigente en catálogo').trim(),
+              secuenciaInspeccion: Array.isArray(parsed.secuenciaInspeccion)
+                ? parsed.secuenciaInspeccion.map((x: any) => String(x).trim()).filter(Boolean)
+                : [],
+              referencias: Array.isArray(parsed.referencias)
+                ? parsed.referencias.map((x: any) => String(x).trim()).filter(Boolean)
+                : [],
+            },
+          });
+          return;
+        }
+      } catch (err: any) {
+        console.warn('[AnotadorAuditar] Fallback local:', err?.message || err);
+        formatearAvisoErrorGemini(err);
+      }
+    }
+
+    const frags = recuperado?.fragmentosSeleccionados || [];
+    res.json({
+      exito: true,
+      fuente: 'indice-local',
+      dictamen: {
+        titulo: `Auditoría Técnica: ${queryStr}`,
+        exigenciaPliego:
+          frags.length > 0
+            ? frags.slice(0, 2).map(f => `[${f.pliegoNombre} Pág. ${f.pagina}]: ${f.texto.slice(0, 420)}`).join('\n\n')
+            : localRef.resumen,
+        planoApc:
+          Array.isArray(planosMencionados) && planosMencionados[0]
+            ? `${planosMencionados[0].codigo} Rev.${planosMencionados[0].revision || '0'}`
+            : 'Consultar plano APC en pestaña Planos',
+        secuenciaInspeccion: [
+          'Verificar disponibilidad de plano con sello Apto Para Construcción (APC) vigente en frente.',
+          'Controlar cotas, materiales certificados y protocolos de ensayo previo a la liberación.',
+          'Registrar mediciones reales con fotografías geotagged y nota de inspección.',
+        ],
+        referencias:
+          frags.length > 0
+            ? frags.slice(0, 4).map(f => `${f.pliegoNombre} (Pág. ${f.pagina})`)
+            : ['Pliego Técnico de Obra 132 kV'],
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ exito: false, error: err?.message || 'Error ejecutando auditoría técnica.' });
+  }
+});
+
+app.post('/api/anotador/transcribir-audio', async (req, res) => {
+  try {
+    const { dataUrl, mimeType } = req.body || {};
+    const raw = String(dataUrl || '').trim();
+    if (!raw) {
+      res.status(400).json({ exito: false, error: 'Audio requerido para transcribir.' });
+      return;
+    }
+
+    const match = raw.match(/^data:([^;]+);base64,(.+)$/i);
+    const detectedMime = match ? match[1].split(';')[0] : String(mimeType || 'audio/webm');
+    const base64Data = match ? match[2] : raw;
+
+    if (!isModelosPagosHabilitados() || tieneGroqConfigurado()) {
+      if (!tieneGroqConfigurado()) {
+        res.status(503).json({
+          exito: false,
+          error:
+            'El modo gratuito ($0) usa Groq Whisper para transcribir notas de voz, pero falta GROQ_API_KEY en el servidor.',
+        });
+        return;
+      }
+
+      const groqRes = await transcribirAudioCortoConGroq({
+        buffer: Buffer.from(base64Data, 'base64'),
+        mimeType: detectedMime,
+      });
+      res.json({
+        exito: true,
+        modelo: groqRes.modeloUsado,
+        transcripcion: groqRes.texto || '(Audio sin habla detectable)',
+      });
+      return;
+    }
+
+    const clienteAi = obtenerClienteGeminiActivo();
+    if (!clienteAi) {
+      res.status(503).json({
+        exito: false,
+        error: 'Gemini API no configurada en el servidor para transcribir audios.',
+      });
+      return;
+    }
+
+    const audioPart = {
+      inlineData: {
+        mimeType: detectedMime,
+        data: base64Data,
+      },
+    };
+
+    const { response, modelUsed } = await generarContenidoConFallback({
+      ai: clienteAi,
+      model: GEMINI_TRANSCRIBE_MODEL,
+      isAudio: true,
+      contents: {
+        parts: [
+          audioPart,
+          {
+            text:
+              'Transcribe fielmente esta nota de voz de inspección de obra eléctrica 132 kV en español, respetando terminología técnica (hormigón H-25, puesta a tierra, PAT, ohmios, conductor ACSR, OPGW, aisladores, piquetes, APC, cruces).',
+          },
+        ],
+      },
+      timeoutMs: 25000,
+    });
+
+    const transcripcion = (response.text || '').trim();
+    clearUltimoErrorGemini();
+    res.json({
+      exito: true,
+      modelo: modelUsed,
+      transcripcion: transcripcion || '(Audio sin habla detectable)',
+    });
+  } catch (err: any) {
+    console.warn('[TranscribirAudio] Error:', err?.message || err);
+    if (!isModelosPagosHabilitados()) {
+      res.status(500).json({
+        exito: false,
+        error: sanitizarErrorGroq(err?.message || 'Error transcribiendo audio con Groq Whisper.'),
+      });
+      return;
+    }
+    formatearAvisoErrorGemini(err);
+    const info = clasificarErrorGemini(err);
+    res.status(info.codigoHttp === 402 ? 402 : 500).json({
+      exito: false,
+      error: info.estado === 'CREDITOS_AGOTADOS'
+        ? 'Créditos prepagos de Gemini agotados (HTTP 402). Verifica facturación o clave en Settings > Secrets.'
+        : info.mensaje || 'Error transcribiendo audio con Gemini.',
+    });
+  }
+});
+
+app.post('/api/anotador/analizar-foto', async (req, res) => {
+  try {
+    const { dataUrl, nombre = 'foto_campo.jpg', notaActual = '' } = req.body || {};
+    const raw = String(dataUrl || '').trim();
+    if (!raw) {
+      res.status(400).json({ exito: false, error: 'Imagen requerida para analizar.' });
+      return;
+    }
+
+    const match = raw.match(/^data:([^;]+);base64,(.+)$/i);
+    const detectedMime = match ? match[1] : 'image/jpeg';
+    const base64Data = match ? match[2] : raw;
+
+    const promptAnalisisFoto =
+      `Inspecciona esta fotografía de campo de una obra eléctrica 132 kV ("${nombre}"). ` +
+      (notaActual ? `Contexto de notas de campo: "${String(notaActual).slice(0, 600)}". ` : '') +
+      `Entrega un diagnóstico técnico conciso (4 a 6 puntos en viñetas): ` +
+      `1) Elementos visibles (excavación, armadura, hormigón, estructura metálica, puesta a tierra, conductores, tablero o EPP), ` +
+      `2) Estado constructivo o avance observado, ` +
+      `3) Posibles observaciones de calidad o seguridad e higiene (H&S) si las hubiera, ` +
+      `4) Recomendación de registro para libro/inspección.`;
+
+    if (!isModelosPagosHabilitados()) {
+      if (!tieneOpenRouterConfigurado()) {
+        res.status(503).json({
+          exito: false,
+          error:
+            'El modo gratuito ($0) usa OpenRouter Vision (:free) para analizar fotos, pero falta OPENROUTER_API_KEY en el servidor.',
+        });
+        return;
+      }
+
+      const normalizedDataUrl = raw.startsWith('data:')
+        ? raw
+        : `data:${detectedMime};base64,${base64Data}`;
+      const visionRes = await generarVisionOpenRouter({
+        dataUrl: normalizedDataUrl,
+        prompt: promptAnalisisFoto,
+        timeoutMs: 35000,
+      });
+      res.json({
+        exito: true,
+        modelo: visionRes.modelUsed,
+        analisisIA: visionRes.texto || 'Análisis completado sin observaciones adicionales.',
+      });
+      return;
+    }
+
+    const clienteAi = obtenerClienteGeminiActivo();
+    if (!clienteAi) {
+      res.status(503).json({
+        exito: false,
+        error: 'Gemini API no configurada en el servidor para analizar imágenes.',
+      });
+      return;
+    }
+
+    const { response, modelUsed } = await generarContenidoConFallback({
+      ai: clienteAi,
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType: detectedMime,
+              data: base64Data,
+            },
+          },
+          {
+            text: promptAnalisisFoto,
+          },
+        ],
+      },
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
+      timeoutMs: 25000,
+    });
+
+    const analisisIA = (response.text || '').trim();
+    clearUltimoErrorGemini();
+    res.json({
+      exito: true,
+      modelo: modelUsed,
+      analisisIA: analisisIA || 'Análisis completado sin observaciones adicionales.',
+    });
+  } catch (err: any) {
+    console.warn('[AnalizarFoto] Error:', err?.message || err);
+    if (!isModelosPagosHabilitados()) {
+      res.status(500).json({
+        exito: false,
+        error: err?.message || 'Error analizando fotografía en modo gratuito.',
+      });
+      return;
+    }
+    formatearAvisoErrorGemini(err);
+    const info = clasificarErrorGemini(err);
+    res.status(info.codigoHttp === 402 ? 402 : 500).json({
+      exito: false,
+      error: info.estado === 'CREDITOS_AGOTADOS'
+        ? 'Créditos prepagos de Gemini agotados (HTTP 402). Verifica facturación o clave en Settings > Secrets.'
+        : info.mensaje || 'Error analizando imagen con Gemini.',
+    });
+  }
+});
+
+function normalizarHistorialConversacion(
+  historialMensajes?: unknown,
+  historialLegacy?: unknown
+): HistorialTurnoOpenRouter[] {
+  const resultado: HistorialTurnoOpenRouter[] = [];
+  if (Array.isArray(historialMensajes)) {
+    for (const item of historialMensajes) {
+      if (!item || typeof item !== 'object') continue;
+      const obj = item as Record<string, any>;
+      const rawRol = String(obj.rol || obj.role || '').toLowerCase();
+      const rol: 'usuario' | 'asistente' =
+        rawRol === 'asistente' || rawRol === 'assistant' || rawRol === 'model'
+          ? 'asistente'
+          : 'usuario';
+      const texto = String(obj.texto || obj.text || obj.content || obj.contenido || '').trim();
+      if (!texto) continue;
+      resultado.push({ rol, texto: texto.slice(0, 4000) });
+    }
+  } else if (Array.isArray(historialLegacy)) {
+    for (const item of historialLegacy) {
+      if (!item || typeof item !== 'object') continue;
+      const obj = item as Record<string, any>;
+      const rawRol = String(obj.rol || obj.role || '').toLowerCase();
+      const rol: 'usuario' | 'asistente' =
+        rawRol === 'asistente' || rawRol === 'assistant' || rawRol === 'model'
+          ? 'asistente'
+          : 'usuario';
+      const texto = String(obj.texto || obj.text || obj.content || obj.contenido || '').trim();
+      if (texto) resultado.push({ rol, texto: texto.slice(0, 4000) });
+    }
+  }
+  return resultado.slice(-14);
+}
+
+function construirTurnosGemini(
+  historialNormalizado: HistorialTurnoOpenRouter[],
+  partsActuales: any[]
+): Array<{ role: 'user' | 'model'; parts: any[] }> {
+  const turns: Array<{ role: 'user' | 'model'; parts: any[] }> = [];
+  for (const h of historialNormalizado) {
+    const txt = (h.texto || '').trim();
+    if (!txt) continue;
+    const role: 'user' | 'model' = h.rol === 'asistente' ? 'model' : 'user';
+    if (turns.length === 0 && role === 'model') {
+      continue;
+    }
+    const prev = turns[turns.length - 1];
+    if (prev && prev.role === role) {
+      prev.parts.push({ text: `\n${txt}` });
+    } else {
+      turns.push({ role, parts: [{ text: txt }] });
+    }
+  }
+
+  // Si el último turno previo ya era 'user', insertar un breve puente 'model' o concatenar limpio
+  if (turns.length > 0 && turns[turns.length - 1].role === 'user') {
+    turns[turns.length - 1].parts.push(...partsActuales);
+    return turns;
+  }
+
+  turns.push({ role: 'user', parts: partsActuales });
+  return turns;
+}
+
+function determinarThinkingLevelDinamico(
+  decision: Extract<ReturnType<typeof resolverEjecucionPrecision>, { permitido: true }>,
+  mensaje: string
+): { thinkingEnum: ThinkingLevel; thinkingLabel: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' } {
+  if (decision.def.modelo === 'gemini-4-hydrogen') {
+    const esCompleja =
+      mensaje.length > 180 ||
+      /\b(compar|discrepanc|contradic|diferenc|resum|explic|redacta|calcula|analiza|audita|evalua|justifica|paso a paso|punto por punto|relacion|por que|como funciona|estrategia)\b/i.test(
+        mensaje
+      );
+    if (esCompleja) {
+      return { thinkingEnum: ThinkingLevel.HIGH, thinkingLabel: 'HIGH' };
+    }
+  }
+  return {
+    thinkingEnum: decision.thinkingEnum,
+    thinkingLabel: decision.def.thinkingLevel,
+  };
+}
+
 /**
- * Helper compartido para armar las partes de consulta completa (Pliegos + Planos PDF + Datos vivos de Obra) hacia Gemini.
+ * Helper compartido para armar las partes de consulta completa (Pliegos + Docs Drive + Planos PDF + Datos vivos de Obra) hacia Gemini.
  */
 async function prepararContenidoConsulta(
   mensaje: string,
-  historial?: string,
-  contextoObra?: any
+  historial?: unknown,
+  contextoObra?: any,
+  driveOptions?: { accessToken?: string; folderId?: string },
+  historialMensajes?: unknown
 ) {
   obtenerClienteGeminiActivo();
-  const recuperado = recuperarFragmentosRelevantes(mensaje, pliegosIndexados, 110000);
+  const historialNormalizado = normalizarHistorialConversacion(historialMensajes, historial);
+  const historialTexto =
+    typeof historial === 'string' && historial.trim()
+      ? historial
+      : historialNormalizado
+          .map(h => `${h.rol === 'usuario' ? 'Usuario' : 'Asistente'}: ${h.texto}`)
+          .join('\n');
+
+  const analisisSemantico = analizarYExpandirConsulta(mensaje, historialTexto);
+  const { consultaCombinada } = extraerTerminosBusquedaDrive(mensaje, historialTexto);
+  const recuperado = recuperarFragmentosRelevantes(consultaCombinada, pliegosIndexados, 160000);
   const escaneados = pliegosIndexados.filter(p => p.esEscaneado);
+
+  // Búsqueda en caché local + búsqueda en vivo en Google Drive (Memorias Descriptivas, Estudios de Suelos, Especificaciones, etc.)
+  const driveRes = await buscarYLeerDocumentosDriveEnVivo({
+    query: mensaje,
+    historial: historialTexto,
+    accessToken: driveOptions?.accessToken,
+    rootFolderId: driveOptions?.folderId,
+    ai,
+    storeActual: storeDriveDocumentos,
+  });
+  storeDriveDocumentos = driveRes.storeActualizado;
 
   const parts: any[] = [];
 
@@ -1432,7 +3182,74 @@ async function prepararContenidoConsulta(
     }
   }
 
-  // Si hay documentos PDF adjuntados en el Chat IA (Órdenes de Servicio TRANSNOA, devoluciones, notas), incluirlos íntegros
+  // Inventario explícito y verificable para evitar confundir Pliegos/Catálogo con Memorias no cargadas
+  const notasLibroFuente: NotaLibro[] =
+    storeNotasLibro.length > 0
+      ? storeNotasLibro
+      : Array.isArray(contextoObra?.notasLibro)
+        ? (contextoObra.notasLibro as NotaLibro[])
+        : Array.isArray(contextoObra?.notasLibroResumen)
+          ? (contextoObra.notasLibroResumen as NotaLibro[])
+          : [];
+
+  const listaPliegosCargados =
+    pliegosIndexados.length > 0
+      ? pliegosIndexados.map(p => `${p.nombre} (${p.paginas} págs)`).join(' | ')
+      : '(ninguno cargado)';
+  const listaDocsDrive =
+    storeDriveDocumentos.length > 0
+      ? storeDriveDocumentos
+          .slice(0, 30)
+          .map(d => `${d.nombre} [${d.rutaCarpeta}, ${d.paginas} págs]`)
+          .join(' | ')
+      : '(ninguno indexado todavía)';
+  const listaAdjuntosChat =
+    chatAdjuntos.length > 0
+      ? chatAdjuntos.map(a => `${a.nombre} (${a.paginas} págs)`).join(' | ')
+      : '(ninguno)';
+  const estadoDriveVivo = driveOptions?.accessToken
+    ? driveRes.errorDrive
+      ? `CONECTADO CON ERROR (${driveRes.errorDrive})`
+      : `ACTIVO (búsqueda en vivo ejecutada; documentos nuevos leídos en este turno: ${
+          driveRes.nuevosLeidos.length > 0 ? driveRes.nuevosLeidos.join(', ') : '0'
+        })`
+    : 'NO CONECTADO EN ESTA SESIÓN (para leer enlaces o carpetas de Drive en vivo el usuario debe presionar "Conectar Drive" / "Docs Drive"; si el navegador bloquea el popup con auth/popup-blocked, debe permitir popups o usar "Abrir en pestaña nueva", o bien usar "Adjuntar PDF" directo en el chat)';
+
+  parts.push({
+    text:
+      `INVENTARIO REAL DE DOCUMENTOS DISPONIBLES EN ESTA CONSULTA:\n` +
+      `- Pliegos Reales indexados (${pliegosIndexados.length}): ${listaPliegosCargados}\n` +
+      `- Documentos Técnicos / Memorias Descriptivas de Google Drive indexados (${storeDriveDocumentos.length}): ${listaDocsDrive}\n` +
+      `- Búsqueda en vivo en Google Drive: ${estadoDriveVivo}\n` +
+      `- PDFs adjuntos en el Chat (${chatAdjuntos.length}): ${listaAdjuntosChat}\n` +
+      `- Notas de Libro de Comunicaciones (${notasLibroFuente.length})\n` +
+      `- Minutas de Reunión (${storeMinutas.minutas.length})\n` +
+      `- Planos PDF en Comparador: A=${planosComparador.A?.nombre || 'ninguno'}, B=${planosComparador.B?.nombre || 'ninguno'}\n` +
+      `- Catálogo de Planos: es SOLO un listado de códigos y títulos (ej. ET-LE-OC-MD-513), NO contiene el texto interno de Memorias Descriptivas ni Estudios de Suelos.\n` +
+      `IMPORTANTE: Si el usuario pide buscar dentro de un documento específico (p. ej. una Memoria Descriptiva o Estudio particular) y ese documento NO figura en las listas reales anteriores ni en los extractos de Drive/Pliegos/Adjuntos de abajo, infórmalo con total transparencia al principio de tu respuesta antes de ofrecer cualquier información complementaria o criterio técnico general.`,
+  });
+
+  // 1. LIBRO DE COMUNICACIONES / NOTAS DE LIBRO (Índice completo + Hilos Pregunta-Respuesta + Actores + Textos)
+  if (notasLibroFuente.length > 0) {
+    const contextoNotas = construirContextoNotasLibro(consultaCombinada, notasLibroFuente, 85000);
+    if (contextoNotas) {
+      parts.push({
+        text: contextoNotas,
+      });
+    }
+  }
+
+  // 2. Documentos Técnicos / Memorias Descriptivas / Estudios desde Google Drive
+  if (driveRes.contextoTexto) {
+    parts.push({
+      text:
+        `EXTRACTOS REALES DE DOCUMENTOS TÉCNICOS / MEMORIAS DESCRIPTIVAS DE GOOGLE DRIVE ` +
+        `(Coincidentes: ${driveRes.documentosCoincidentes.map(d => `${d.nombre} [${d.rutaCarpeta}]`).join(', ') || 'ver inventario'}):\n` +
+        `${driveRes.contextoTexto}`,
+    });
+  }
+
+  // 3. Documentos PDF adjuntados en el Chat IA
   if (chatAdjuntos.length > 0) {
     const infoAdjuntos: string[] = [];
     for (const adj of chatAdjuntos) {
@@ -1450,29 +3267,29 @@ async function prepararContenidoConsulta(
       infoAdjuntos.push(
         `=== DOCUMENTO PDF ADJUNTO EN CHAT: ${adj.nombre} (${adj.paginas} págs, ${adj.caracteresTexto} chars) ===\n` +
         `Métricas / códigos detectados: ${(adj.metricasDetectadas || []).join(', ') || 'N/A'}\n` +
-        `${adj.contenidoTexto ? adj.contenidoTexto.slice(0, 45000) : '[Archivo PDF escaneado adjunto visualmente]'}`
+        `${adj.contenidoTexto ? adj.contenidoTexto.slice(0, 60000) : '[Archivo PDF escaneado adjunto visualmente]'}`
       );
     }
     parts.push({
-      text: `DOCUMENTOS PDF ADJUNTADOS POR EL USUARIO EN EL CHAT (ÓRDENES DE SERVICIO / DEVOLUCIONES / NOTAS A AUDITAR CONTRA PLIEGO):\n${infoAdjuntos.join('\n\n')}`,
+      text: `DOCUMENTOS PDF ADJUNTADOS POR EL USUARIO EN EL CHAT:\n${infoAdjuntos.join('\n\n')}`,
     });
   }
 
-  // Si hay planos PDF cargados en el comparador, incluirlos también en el chat integral
+  // 4. Planos PDF cargados en el comparador
   if (planosComparador.A || planosComparador.B) {
     const infoPlanos: string[] = [];
     if (planosComparador.A) {
       infoPlanos.push(
         `[PLANO A EN COMPARADOR: ${planosComparador.A.nombre} (${planosComparador.A.paginas} págs)]\n` +
-        `Métricas: ${planosComparador.A.metricasDetectadas.join(', ')}\n` +
-        `${planosComparador.A.contenidoTexto.slice(0, 18000)}`
+        `Métricas: ${(planosComparador.A.metricasDetectadas || []).join(', ')}\n` +
+        `${(planosComparador.A.contenidoTexto || '').slice(0, 22000)}`
       );
     }
     if (planosComparador.B) {
       infoPlanos.push(
         `[PLANO B EN COMPARADOR: ${planosComparador.B.nombre} (${planosComparador.B.paginas} págs)]\n` +
-        `Métricas: ${planosComparador.B.metricasDetectadas.join(', ')}\n` +
-        `${planosComparador.B.contenidoTexto.slice(0, 18000)}`
+        `Métricas: ${(planosComparador.B.metricasDetectadas || []).join(', ')}\n` +
+        `${(planosComparador.B.contenidoTexto || '').slice(0, 22000)}`
       );
     }
     parts.push({
@@ -1480,47 +3297,128 @@ async function prepararContenidoConsulta(
     });
   }
 
+  // 5. Datos vivos de obra (Catálogo completo/filtrado de Planos, Hitos, Interferencias reales, Notas de Campo)
   if (contextoObra) {
+    const { notasLibro: _omitDup, notasLibroResumen: _omitRes, ...restoContexto } = contextoObra;
     parts.push({
-      text: `DATOS VIVOS DE LA OBRA (CATÁLOGO DE PLANOS, HITOS CONTRACTUALES, INTERFERENCIAS, MINUTAS Y COMPROMISOS):\n${JSON.stringify(contextoObra)}`,
+      text: `DATOS VIVOS DE LA OBRA (CATÁLOGO DE PLANOS, HITOS CONTRACTUALES, INTERFERENCIAS REALES Y NOTAS DE CAMPO):\n${JSON.stringify(restoContexto)}`,
+    });
+  } else if (storeInterferencias.length > 0) {
+    parts.push({
+      text: `INTERFERENCIAS Y CRUCES REALES SINCRONIZADOS (${storeInterferencias.length}):\n${JSON.stringify(storeInterferencias)}`,
     });
   }
 
-  if (storeMinutas.minutas.length > 0 || storeMinutas.compromisos.length > 0) {
-    const resumenMinutas = storeMinutas.minutas.slice(0, 12).map(m =>
-      `[MINUTA ${m.codigo} | ${m.fechaReunion} | ${m.frente}]: ${m.titulo}\nResumen: ${m.resumen || ''}\nExtracto:\n${m.contenidoTexto.slice(0, 4500)}`
-    ).join('\n\n');
-    const resumenComp = storeMinutas.compromisos.slice(0, 50).map(c =>
-      `- [${c.estado}] (${c.minutaCodigo} ${c.minutaFecha}) ${c.numeroItem}: ${c.descripcion} | Resp: ${c.responsable} | Vence: ${c.fechaLimite} | NP: ${(c.notasPedidoIds || []).join(', ') || 'Sin NP'}`
-    ).join('\n');
+  // 6. Minutas, Compromisos y Notas de Pedido de Ingeniería
+  if (storeMinutas.minutas.length > 0 || storeMinutas.compromisos.length > 0 || storeMinutas.notasPedido.length > 0) {
+    const indiceTodasMinutas = storeMinutas.minutas
+      .map(
+        m =>
+          `• [${m.codigo} | ${m.fechaReunion} | ${m.frente}] ${m.titulo} | Participantes: ${m.participantes || 'N/A'} | Resumen: ${m.resumen || ''}`
+      )
+      .join('\n');
+
+    const minutasConScore = storeMinutas.minutas.map(m => {
+      const full = `${m.codigo} ${m.titulo} ${m.contenidoTexto || ''}`
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+      let sc = 0;
+      for (const w of analisisSemantico.tokensNucleo) {
+        if (full.includes(w)) sc += 12;
+      }
+      for (const w of analisisSemantico.tokensExpandidos) {
+        if (full.includes(w)) sc += 5;
+      }
+      for (const frase of analisisSemantico.frasesClave) {
+        if (full.includes(frase)) sc += 18;
+      }
+      return { m, sc };
+    });
+    minutasConScore.sort(
+      (a, b) => b.sc - a.sc || (b.m.fechaReunion || '').localeCompare(a.m.fechaReunion || '')
+    );
+
+    const extractosMinutas = minutasConScore
+      .slice(0, 12)
+      .map(
+        ({ m }) =>
+          `[MINUTA ${m.codigo} | ${m.fechaReunion} | ${m.frente}]: ${m.titulo}\n${(m.contenidoTexto || '').slice(0, 5000)}`
+      )
+      .join('\n\n');
+
+    const resumenComp = storeMinutas.compromisos
+      .map(
+        c =>
+          `- [${c.estado}] (${c.minutaCodigo} ${c.minutaFecha}) ${c.numeroItem}: ${c.descripcion} | Resp: ${c.responsable} | Vence: ${c.fechaLimite} | NP: ${(c.notasPedidoIds || []).join(', ') || 'Sin NP'}`
+      )
+      .join('\n');
+
+    const resumenNotasPed = storeMinutas.notasPedido
+      .map(
+        np =>
+          `• [${np.numeroNota} | ${np.fechaEmision}] Emisor: ${np.emisor} ➔ Destinatario: ${np.destinatario} | Asunto: ${np.asunto}\n${(np.contenidoMarkdown || '').slice(0, 3500)}`
+      )
+      .join('\n\n');
+
     parts.push({
-      text: `MINUTAS DE REUNIÓN Y COMPROMISOS REGISTRADOS:\n${resumenMinutas}\n\nCOMPROMISOS:\n${resumenComp}`,
+      text:
+        `MINUTAS DE REUNIÓN (${storeMinutas.minutas.length} TOTALES):\n${indiceTodasMinutas}\n\n` +
+        `EXTRACTOS DE MINUTAS RELEVANTES:\n${extractosMinutas}\n\n` +
+        `COMPROMISOS (${storeMinutas.compromisos.length} TOTALES):\n${resumenComp}\n\n` +
+        (resumenNotasPed ? `NOTAS DE PEDIDO GENERADAS:\n${resumenNotasPed}` : ''),
     });
   }
 
+  // 7. Pliegos Reales indexados
   if (recuperado.contextoTexto) {
     parts.push({
       text: `CONTEXTO DE PLIEGOS REALES INDEXADOS:\n${recuperado.contextoTexto}`,
     });
   }
 
+  const consultaEsSobreNotasLibro =
+    /\b(nota|notas de libro|libro de comunicaciones|orden de servicio|nota de pedido|nota de servicio|np-|os-|ns-|lib-|transnoa.*contest|contest.*nota|discrepanc.*nota|quien emit)/i.test(
+      mensaje
+    );
+
   parts.push({
     text:
-      `${historial ? `Historial reciente de conversación:\n${historial}\n\n` : ''}` +
-      `SOLICITUD DEL USUARIO:\n${mensaje}\n\n` +
-      `Instrucción: Si existen Documentos PDF Adjuntos en el Chat (ej. Orden de Servicio de TRANSNOA / devolución de documentación) y/o el usuario solicita comparar contra el pliego, genera obligatoriamente un **cuadro comparativo de discrepancias y cumplimiento en tabla Markdown** citando cada observación/cláusula del PDF adjunto, el texto/exigencia exacta del Pliego (tomo, artículo y página) y el dictamen técnico-contractual (Discrepancia / Cumple / Excede el Pliego / Sin respaldo en pliego).`,
+      `SOLICITUD ACTUAL DEL USUARIO:\n${mensaje}\n\n` +
+      `Criterios de respuesta para este turno:\n` +
+      `- Responde con la profundidad, fluidez y naturalidad de un Ingeniero Senior que domina tanto la ingeniería eléctrica/civil (AEA, CIRSOC, IRAM, IEC, ASTM) como la documentación real del proyecto.\n` +
+      `- Si el usuario redactó una consulta extensa, coloquial o con múltiples sub-preguntas, aborda cada punto de manera ordenada, conectando las ideas y explicando implicancias prácticas de obra, sin omitir matices.\n` +
+      `- Verifica primero el INVENTARIO REAL DE DOCUMENTOS arriba: si pidió un archivo puntual que NO figura cargado ni hallado en Google Drive, acláralo con naturalidad al inicio (indicando cómo conectar Drive o adjuntar el PDF) antes de aportar lo encontrado en otras fuentes o tu criterio de ingeniería.\n` +
+      `- Nunca inventes códigos de nota, artículos, fechas ni fragmentos literales inexistentes.\n` +
+      (consultaEsSobreNotasLibro
+        ? `- Al tratarse de Notas de Libro / Comunicaciones, diferencia claramente Emisor vs. Receptor (UTE / Contratista vs. TRANSNOA vs. Inspección vs. Comitente) y resume en tabla Markdown clara cuando compare contestaciones o discrepancias.`
+        : `- Adapta el formato a la intención del usuario (explicación clara, análisis por puntos, cálculos paso a paso, borrador formal o tabla comparativa si ayuda).`),
   });
 
-  return { parts, recuperado };
+  return { parts, historialNormalizado, recuperado, driveRes };
 }
 
 function construirFallbackInteligente(
   mensaje: string,
   recuperado: ReturnType<typeof recuperarFragmentosRelevantes>,
-  contextoObra?: any
+  contextoObra?: any,
+  driveContextoTexto?: string
 ): string {
   if (chatAdjuntos.length > 0) {
     return auditarAdjuntoVsPliegoLocal(chatAdjuntos, pliegosIndexados, mensaje);
+  }
+
+  if (driveContextoTexto && driveContextoTexto.trim()) {
+    return `### Extractos encontrados en Documentos Técnicos de Google Drive\n\n${driveContextoTexto.slice(0, 12000)}`;
+  }
+
+  if (
+    storeNotasLibro.length > 0 &&
+    /\b(nota|libro|transnoa|contest|respond|orden de servicio|nota de pedido|nota de servicio|discrepanc|actor|np|os|ns)\b/i.test(
+      mensaje
+    )
+  ) {
+    return construirFallbackLocalNotasLibro(mensaje, storeNotasLibro);
   }
 
   // Si el usuario pide comparar Planos A/B en el chat
@@ -1559,17 +3457,22 @@ function construirFallbackInteligente(
     return generarCuadroComparativoLocal(mensaje, pliegosIndexados, recuperado);
   }
 
+  if (storeNotasLibro.length > 0) {
+    return construirFallbackLocalNotasLibro(mensaje, storeNotasLibro);
+  }
+
   const local = buscarYExtraerDePliegosReales(mensaje, pliegosIndexados);
   return local.resumen;
 }
 
 const SYSTEM_INSTRUCTION_OBRA_COMPLETA =
-  'Eres el Asistente Integral de Ingeniería Eléctrica 132 kV, Control Documental y Auditoría Contractual. ' +
-  'Tienes acceso completo a los PLIEGOS REALES indexados, los DOCUMENTOS PDF ADJUNTADOS EN EL CHAT (como Órdenes de Servicio de TRANSNOA o devoluciones de archivos), los PLANOS PDF cargados en el comparador, Minutas/Compromisos, el Catálogo de Planos emitido, Hitos Contractuales e Interferencias. ' +
-  'Reglas de respuesta:\n' +
-  '1. Cuando existan PDF adjuntos en el Chat y/o el usuario pida discrepancias, cruces o comparaciones, responde SIEMPRE con **tablas Markdown** claras y ordenadas (| Columna 1 | Columna 2 | ... |).\n' +
-  '2. Cita siempre documento, número de página, cláusula o artículo exacto con sus tolerancias y unidades.\n' +
-  '3. No inventes datos ni valores ausentes; si algo no figura en los documentos provistos, indícalo explícitamente.';
+  'Eres un Ingeniero Senior Especialista en Obras de Alta Tensión 132 kV (Líneas Aéreas LAT y Estaciones Transformadoras ET), Ingeniería Civil/Geotecnia, Control Documental y Auditoría Contractual en Argentina.\n' +
+  'Comunícate como una IA conversacional inteligente, natural y resolutiva en español: comprende preguntas extensas, coloquiales, matices de obra o consultas con múltiples temas entrelazados, razona paso a paso cuando la situación lo amerite y responde con claridad y criterio práctico.\n' +
+  'Principios de trabajo:\n' +
+  '1. **Comprensión amplia y continuidad real**: Interpreta el sentido completo de lo que el usuario pregunta (incluso si usa términos informales o hace preguntas de seguimiento como "y eso cómo afecta..." o "redactame la respuesta para..."), apoyándote en toda la conversación previa.\n' +
+  '2. **Veracidad documental estricta**: Revisa el INVENTARIO REAL DE DOCUMENTOS de cada turno. Si el usuario pide buscar dentro de un documento concreto que NO está cargado ni hallado en Google Drive, dilo con honestidad al comienzo (indicando qué fuentes sí tienes y cómo conectar Drive o adjuntar el PDF) y nunca hagas pasar otro documento como si fuera ese archivo faltante. Jamás inventes códigos de nota, fechas, artículos ni citas literales.\n' +
+  '3. **Criterio técnico y formato flexible**: Domina normativa AEA 95301, CIRSOC, IRAM, IEC y ASTM, redacción formal de Notas de Pedido/Servicio y análisis de desvíos. Adapta la estructura de tu respuesta a lo que mejor ayude al usuario (explicación fluida, lista estructurada, cálculo detallado, borrador listo para enviar o tabla comparativa).\n' +
+  '4. **Libro de Comunicaciones (solo cuando corresponda)**: Si la consulta trata sobre Notas de Libro (NP, OS, NS) o contestaciones/discrepancias, diferencia claramente Emisor vs. Receptor (UTE/Contratista, TRANSNOA, Inspección, Comitente) y usa tablas comparativas cuando aporten claridad.';
 
 // 5. Endpoint STREAMING (SSE) para respuesta instantánea palabra por palabra
 app.post('/api/chat/stream', async (req, res) => {
@@ -1581,17 +3484,25 @@ app.post('/api/chat/stream', async (req, res) => {
   const enviarEvento = (payload: Record<string, any>) => {
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
+  enviarEvento({ status: 'analizando' });
 
   try {
-    const { mensaje, historial, pliegoIds, contextoObra } = req.body || {};
+    const {
+      mensaje,
+      historial,
+      historialMensajes,
+      pliegoIds,
+      contextoObra,
+      driveAccessToken,
+      driveFolderId,
+      precisionNivel,
+      modeloSolicitado,
+    } = req.body || {};
     if (!mensaje || typeof mensaje !== 'string') {
       enviarEvento({ error: 'Mensaje requerido', done: true });
       res.end();
       return;
     }
-
-    const tienePlanosPdf = Boolean(planosComparador.A || planosComparador.B);
-    const tieneAdjuntosChat = chatAdjuntos.length > 0;
 
     if (pliegosIndexados.length === 0 && Array.isArray(pliegoIds) && pliegoIds.length > 0) {
       enviarEvento({ needsSync: true, done: true });
@@ -1599,56 +3510,179 @@ app.post('/api/chat/stream', async (req, res) => {
       return;
     }
 
-    if (pliegosIndexados.length === 0 && !tienePlanosPdf && !tieneAdjuntosChat && !contextoObra) {
+    const decision = resolverEjecucionPrecision({
+      nivelSolicitado: typeof precisionNivel === 'string' ? precisionNivel : undefined,
+      modeloSolicitado: typeof modeloSolicitado === 'string' ? modeloSolicitado : undefined,
+    });
+    if (!decision.permitido) {
       enviarEvento({
-        chunk:
-          '⚠️ **Aún no hay documentos cargados.**\n\nAdjunta un PDF directamente aquí abajo en el Chat o carga tus pliegos en **"Cargar Pliego Real"**.',
+        error: decision.motivoLimite,
+        limitReached: true,
+        estadoPrecision: getGeminiPrecisionState(),
         done: true,
       });
       res.end();
       return;
     }
 
-    const { parts, recuperado } = await prepararContenidoConsulta(mensaje, historial, contextoObra);
+    const tokenDrive =
+      typeof driveAccessToken === 'string' && driveAccessToken.trim()
+        ? driveAccessToken.trim()
+        : String(req.headers['x-drive-token'] || '').trim() || undefined;
+    const folderDrive =
+      typeof driveFolderId === 'string' && driveFolderId.trim() ? driveFolderId.trim() : undefined;
+
+    const { parts, historialNormalizado, recuperado, driveRes } = await prepararContenidoConsulta(
+      mensaje,
+      historial,
+      contextoObra,
+      { accessToken: tokenDrive, folderId: folderDrive },
+      historialMensajes
+    );
+
+    const { thinkingEnum, thinkingLabel } = determinarThinkingLevelDinamico(decision, mensaje);
 
     let avisoErrorGemini = '';
-    const clienteAi = obtenerClienteGeminiActivo();
-    if (clienteAi) {
-      try {
-        const stream = await clienteAi.models.generateContentStream({
-          model: GEMINI_MODEL,
-          contents: { parts },
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+    if (decision.def.proveedor === 'openrouter') {
+      const modeloOrSolicitado = getOpenRouterModeloPreferido();
+      if (tieneOpenRouterConfigurado()) {
+        try {
+          const orRes = await generarStreamOpenRouter({
+            parts,
+            historialMensajes: historialNormalizado,
             systemInstruction: SYSTEM_INSTRUCTION_OBRA_COMPLETA,
-          },
-        });
+            model: modeloOrSolicitado,
+            onChunk: chunkTxt => {
+              enviarEvento({ chunk: chunkTxt });
+            },
+          });
 
-        let huboTexto = false;
-        for await (const chunk of stream) {
-          const txt = chunk.text;
-          if (txt) {
-            huboTexto = true;
-            enviarEvento({ chunk: txt });
+          if (orRes.textoCompleto.trim().length > 0) {
+            const consumo = registrarConsumoGemini({
+              modelo: OPENROUTER_FREE_MODEL,
+              inputTokensDirecto: orRes.inputTokens,
+              outputTokensDirecto: orRes.outputTokens,
+            });
+            enviarEvento({
+              done: true,
+              fuente: `${orRes.modelUsed}-stream`,
+              nuevosDriveLeidos: driveRes.nuevosLeidos,
+              driveDocsTotal: storeDriveDocumentos.length,
+              precisionMeta: {
+                nivelId: decision.def.nivelId,
+                etiquetaNivel: decision.def.etiquetaNivel,
+                proveedor: 'openrouter',
+                modeloUsado: orRes.modelUsed,
+                thinkingLevel: 'OPENROUTER_FREE',
+                inputTokens: consumo.inputTokens,
+                outputTokens: consumo.outputTokens,
+                costoUsd: 0,
+                ...(decision.fallbackDesdeModelo
+                  ? { fallbackDesdeModelo: decision.fallbackDesdeModelo }
+                  : {}),
+              },
+              estadoPrecision: getGeminiPrecisionState(),
+            });
+            res.end();
+            return;
           }
+        } catch (orErr: any) {
+          console.warn('[OpenRouter Stream] Error:', orErr?.message || orErr);
+          avisoErrorGemini = formatearAvisoErrorOpenRouter(orErr, modeloOrSolicitado);
         }
-
-        if (huboTexto) {
-          ultimoErrorGemini = null;
-          enviarEvento({ done: true, fuente: 'gemini-3.8-flash-stream' });
-          res.end();
-          return;
-        }
-      } catch (geminiError: any) {
-        console.warn('[Gemini Stream] Error llamando a Gemini:', geminiError?.message || geminiError);
-        avisoErrorGemini = formatearAvisoErrorGemini(geminiError);
+      } else {
+        avisoErrorGemini = isModelosPagosHabilitados()
+          ? `> ⚠️ **No se detectó \`OPENROUTER_API_KEY\` en este proceso del servidor.** ` +
+            `Si acabas de guardarla en **Settings > Secrets**, recarga o reinicia el entorno para que el servidor tome la variable; mientras tanto puedes usar **Económico · Rápido (Gemini)**.\n\n`
+          : `> ⚠️ **No se detectó \`OPENROUTER_API_KEY\` en este proceso del servidor.** ` +
+            `Configúrala en **Settings > Secrets** para habilitar el motor gratuito (:free). Mostrando búsqueda local.\n\n`;
       }
     } else {
-      avisoErrorGemini = obtenerAvisoSinClienteGemini();
+      const clienteAi = obtenerClienteGeminiActivo();
+      if (clienteAi) {
+        try {
+          const geminiContents = construirTurnosGemini(historialNormalizado, parts);
+          const { stream, modelUsed } = await generarStreamConFallback({
+            ai: clienteAi,
+            model: decision.def.modelo,
+            contents: geminiContents,
+            config: {
+              thinkingConfig: { thinkingLevel: thinkingEnum },
+              systemInstruction: SYSTEM_INSTRUCTION_OBRA_COMPLETA,
+            },
+          });
+
+          let huboTexto = false;
+          let totalOutputChars = 0;
+          let lastUsageMetadata: any = undefined;
+          for await (const chunk of stream) {
+            if ((chunk as any)?.usageMetadata) {
+              lastUsageMetadata = (chunk as any).usageMetadata;
+            }
+            const txt = chunk.text;
+            if (txt) {
+              huboTexto = true;
+              totalOutputChars += txt.length;
+              enviarEvento({ chunk: txt });
+            }
+          }
+
+          if (huboTexto) {
+            clearUltimoErrorGemini();
+            const inputCharsApprox =
+              parts.reduce((acc, p) => acc + (typeof p?.text === 'string' ? p.text.length : 1000), 0) +
+              historialNormalizado.reduce((acc, h) => acc + h.texto.length, 0);
+            const consumo = registrarConsumoGemini({
+              modelo: modelUsed,
+              usageMetadata: lastUsageMetadata,
+              inputCharsFallback: inputCharsApprox,
+              outputCharsFallback: totalOutputChars,
+            });
+            enviarEvento({
+              done: true,
+              fuente: `${modelUsed}-stream`,
+              nuevosDriveLeidos: driveRes.nuevosLeidos,
+              driveDocsTotal: storeDriveDocumentos.length,
+              precisionMeta: {
+                nivelId: decision.def.nivelId,
+                etiquetaNivel: decision.def.etiquetaNivel,
+                proveedor: 'gemini',
+                modeloUsado: modelUsed,
+                thinkingLevel: thinkingLabel,
+                inputTokens: consumo.inputTokens,
+                outputTokens: consumo.outputTokens,
+                costoUsd: consumo.costoUsd,
+                ...(decision.fallbackDesdeModelo
+                  ? { fallbackDesdeModelo: decision.fallbackDesdeModelo }
+                  : {}),
+              },
+              estadoPrecision: getGeminiPrecisionState(),
+            });
+            res.end();
+            return;
+          }
+        } catch (geminiError: any) {
+          console.warn('[Gemini Stream] Error llamando a Gemini:', geminiError?.message || geminiError);
+          avisoErrorGemini = formatearAvisoErrorGemini(geminiError, decision.def.modelo);
+        }
+      } else {
+        avisoErrorGemini = obtenerAvisoSinClienteGemini();
+      }
     }
 
-    const respuestaLocal = construirFallbackInteligente(mensaje, recuperado, contextoObra);
-    enviarEvento({ chunk: `${avisoErrorGemini}${respuestaLocal}`, done: true, fuente: 'indice-local-rapido' });
+    const respuestaLocal = construirFallbackInteligente(
+      mensaje,
+      recuperado,
+      contextoObra,
+      driveRes.contextoTexto
+    );
+    enviarEvento({
+      chunk: `${avisoErrorGemini}${respuestaLocal}`,
+      done: true,
+      fuente: 'indice-local-rapido',
+      nuevosDriveLeidos: driveRes.nuevosLeidos,
+      driveDocsTotal: storeDriveDocumentos.length,
+    });
     res.end();
   } catch (err: any) {
     enviarEvento({ error: err?.message || 'Error en stream', done: true });
@@ -1675,26 +3709,27 @@ app.post('/api/pliegos/extraer', async (req, res) => {
       return;
     }
 
-    const { parts, recuperado } = await prepararContenidoConsulta(consulta);
+    const { parts, recuperado, driveRes } = await prepararContenidoConsulta(consulta);
 
     let avisoErrorGemini = '';
-    const clienteAi = obtenerClienteGeminiActivo();
-    if (clienteAi) {
+    const clienteAi = isModelosPagosHabilitados() ? obtenerClienteGeminiActivo() : null;
+    if (clienteAi || (!isModelosPagosHabilitados() && tieneOpenRouterConfigurado())) {
       try {
-        const response = await clienteAi.models.generateContent({
-          model: GEMINI_MODEL,
+        const { response, modelUsed } = await generarContenidoConFallback({
+          ai: clienteAi,
           contents: { parts },
           config: {
             thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             systemInstruction: SYSTEM_INSTRUCTION_OBRA_COMPLETA,
           },
+          timeoutMs: 30000,
         });
 
         if (response.text && response.text.trim()) {
-          ultimoErrorGemini = null;
+          clearUltimoErrorGemini();
           res.json({
             exito: true,
-            fuente: 'gemini-3.8-flash',
+            fuente: modelUsed,
             respuesta: response.text,
           });
           return;
@@ -1710,7 +3745,7 @@ app.post('/api/pliegos/extraer', async (req, res) => {
     res.json({
       exito: true,
       fuente: 'indice-local-rapido',
-      respuesta: `${avisoErrorGemini}${construirFallbackInteligente(consulta, recuperado)}`,
+      respuesta: `${avisoErrorGemini}${construirFallbackInteligente(consulta, recuperado, undefined, driveRes.contextoTexto)}`,
     });
   } catch (err: any) {
     res.status(500).json({ exito: false, error: err?.message || 'Error en extracción' });
@@ -1720,7 +3755,17 @@ app.post('/api/pliegos/extraer', async (req, res) => {
 // 7. Endpoint no-streaming /api/chat (compatibilidad)
 app.post('/api/chat', async (req, res) => {
   try {
-    const { mensaje, historial, pliegoIds, contextoObra } = req.body || {};
+    const {
+      mensaje,
+      historial,
+      historialMensajes,
+      pliegoIds,
+      contextoObra,
+      driveAccessToken,
+      driveFolderId,
+      precisionNivel,
+      modeloSolicitado,
+    } = req.body || {};
     if (!mensaje || typeof mensaje !== 'string') {
       res.status(400).json({ exito: false, error: 'Mensaje requerido' });
       return;
@@ -1731,42 +3776,159 @@ app.post('/api/chat', async (req, res) => {
       return;
     }
 
-    const { parts, recuperado } = await prepararContenidoConsulta(mensaje, historial, contextoObra);
+    const decision = resolverEjecucionPrecision({
+      nivelSolicitado: typeof precisionNivel === 'string' ? precisionNivel : undefined,
+      modeloSolicitado: typeof modeloSolicitado === 'string' ? modeloSolicitado : undefined,
+    });
+    if (!decision.permitido) {
+      res.status(429).json({
+        exito: false,
+        limitReached: true,
+        error: decision.motivoLimite,
+        estadoPrecision: getGeminiPrecisionState(),
+      });
+      return;
+    }
+
+    const tokenDrive =
+      typeof driveAccessToken === 'string' && driveAccessToken.trim()
+        ? driveAccessToken.trim()
+        : String(req.headers['x-drive-token'] || '').trim() || undefined;
+    const folderDrive =
+      typeof driveFolderId === 'string' && driveFolderId.trim() ? driveFolderId.trim() : undefined;
+
+    const { parts, historialNormalizado, recuperado, driveRes } = await prepararContenidoConsulta(
+      mensaje,
+      historial,
+      contextoObra,
+      { accessToken: tokenDrive, folderId: folderDrive },
+      historialMensajes
+    );
+
+    const { thinkingEnum, thinkingLabel } = determinarThinkingLevelDinamico(decision, mensaje);
 
     let avisoErrorGemini = '';
-    const clienteAi = obtenerClienteGeminiActivo();
-    if (clienteAi) {
-      try {
-        const response = await clienteAi.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: { parts },
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+    if (decision.def.proveedor === 'openrouter') {
+      const modeloOrSolicitado = getOpenRouterModeloPreferido();
+      if (tieneOpenRouterConfigurado()) {
+        try {
+          const orRes = await generarChatOpenRouter({
+            parts,
+            historialMensajes: historialNormalizado,
             systemInstruction: SYSTEM_INSTRUCTION_OBRA_COMPLETA,
-          },
-        });
-
-        if (response.text && response.text.trim()) {
-          ultimoErrorGemini = null;
-          res.json({
-            exito: true,
-            fuente: 'gemini-3.8-flash',
-            respuesta: response.text,
+            model: modeloOrSolicitado,
+            timeoutMs: 45000,
           });
-          return;
+          if (orRes.texto && orRes.texto.trim()) {
+            const consumo = registrarConsumoGemini({
+              modelo: OPENROUTER_FREE_MODEL,
+              inputTokensDirecto: orRes.inputTokens,
+              outputTokensDirecto: orRes.outputTokens,
+            });
+            res.json({
+              exito: true,
+              fuente: orRes.modelUsed,
+              respuesta: orRes.texto,
+              nuevosDriveLeidos: driveRes.nuevosLeidos,
+              driveDocsTotal: storeDriveDocumentos.length,
+              precisionMeta: {
+                nivelId: decision.def.nivelId,
+                etiquetaNivel: decision.def.etiquetaNivel,
+                proveedor: 'openrouter',
+                modeloUsado: orRes.modelUsed,
+                thinkingLevel: 'OPENROUTER_FREE',
+                inputTokens: consumo.inputTokens,
+                outputTokens: consumo.outputTokens,
+                costoUsd: 0,
+                ...(decision.fallbackDesdeModelo
+                  ? { fallbackDesdeModelo: decision.fallbackDesdeModelo }
+                  : {}),
+              },
+              estadoPrecision: getGeminiPrecisionState(),
+            });
+            return;
+          }
+        } catch (orErr: any) {
+          console.warn('[OpenRouter Chat] Fallback local:', orErr?.message || orErr);
+          avisoErrorGemini = formatearAvisoErrorOpenRouter(orErr, modeloOrSolicitado);
         }
-      } catch (err: any) {
-        console.warn('[Gemini Chat] Fallback local:', err?.message || err);
-        avisoErrorGemini = formatearAvisoErrorGemini(err);
+      } else {
+        avisoErrorGemini = isModelosPagosHabilitados()
+          ? `> ⚠️ **No se detectó \`OPENROUTER_API_KEY\` en este proceso del servidor.** ` +
+            `Si acabas de guardarla en **Settings > Secrets**, recarga o reinicia el entorno para que el servidor tome la variable; mientras tanto puedes usar **Económico · Rápido (Gemini)**.\n\n`
+          : `> ⚠️ **No se detectó \`OPENROUTER_API_KEY\` en este proceso del servidor.** ` +
+            `Configúrala en **Settings > Secrets** para habilitar el motor gratuito (:free). Mostrando búsqueda local.\n\n`;
       }
     } else {
-      avisoErrorGemini = obtenerAvisoSinClienteGemini();
+      const clienteAi = obtenerClienteGeminiActivo();
+      if (clienteAi) {
+        try {
+          const geminiContents = construirTurnosGemini(historialNormalizado, parts);
+          const { response, modelUsed } = await generarContenidoConFallback({
+            ai: clienteAi,
+            model: decision.def.modelo,
+            contents: geminiContents,
+            config: {
+              thinkingConfig: { thinkingLevel: thinkingEnum },
+              systemInstruction: SYSTEM_INSTRUCTION_OBRA_COMPLETA,
+            },
+            timeoutMs: 90000,
+          });
+
+          if (response.text && response.text.trim()) {
+            clearUltimoErrorGemini();
+            const inputCharsApprox =
+              parts.reduce((acc, p) => acc + (typeof p?.text === 'string' ? p.text.length : 1000), 0) +
+              historialNormalizado.reduce((acc, h) => acc + h.texto.length, 0);
+            const consumo = registrarConsumoGemini({
+              modelo: modelUsed,
+              usageMetadata: (response as any).usageMetadata,
+              inputCharsFallback: inputCharsApprox,
+              outputCharsFallback: response.text.length,
+            });
+            res.json({
+              exito: true,
+              fuente: modelUsed,
+              respuesta: response.text,
+              nuevosDriveLeidos: driveRes.nuevosLeidos,
+              driveDocsTotal: storeDriveDocumentos.length,
+              precisionMeta: {
+                nivelId: decision.def.nivelId,
+                etiquetaNivel: decision.def.etiquetaNivel,
+                proveedor: 'gemini',
+                modeloUsado: modelUsed,
+                thinkingLevel: thinkingLabel,
+                inputTokens: consumo.inputTokens,
+                outputTokens: consumo.outputTokens,
+                costoUsd: consumo.costoUsd,
+                ...(decision.fallbackDesdeModelo
+                  ? { fallbackDesdeModelo: decision.fallbackDesdeModelo }
+                  : {}),
+              },
+              estadoPrecision: getGeminiPrecisionState(),
+            });
+            return;
+          }
+        } catch (err: any) {
+          console.warn('[Gemini Chat] Fallback local:', err?.message || err);
+          avisoErrorGemini = formatearAvisoErrorGemini(err, decision.def.modelo);
+        }
+      } else {
+        avisoErrorGemini = obtenerAvisoSinClienteGemini();
+      }
     }
 
     res.json({
       exito: true,
       fuente: 'indice-local-rapido',
-      respuesta: `${avisoErrorGemini}${construirFallbackInteligente(mensaje, recuperado, contextoObra)}`,
+      respuesta: `${avisoErrorGemini}${construirFallbackInteligente(
+        mensaje,
+        recuperado,
+        contextoObra,
+        driveRes.contextoTexto
+      )}`,
+      nuevosDriveLeidos: driveRes.nuevosLeidos,
+      driveDocsTotal: storeDriveDocumentos.length,
     });
   } catch (err: any) {
     res.status(500).json({ exito: false, error: err?.message || 'Error en procesamiento' });
@@ -1774,15 +3936,60 @@ app.post('/api/chat', async (req, res) => {
 });
 
 async function startServer() {
+  // Garantizar que ninguna ruta no encontrada o error bajo /api/* devuelva HTML (vite fallback o finalhandler)
+  app.use('/api', (req, res) => {
+    res.status(404).json({
+      exito: false,
+      error: `Ruta API no encontrada: ${req.method} ${req.originalUrl}`,
+    });
+  });
+
+  app.use(
+    '/api',
+    (
+      err: any,
+      _req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction
+    ) => {
+      const status =
+        typeof err?.status === 'number'
+          ? err.status
+          : typeof err?.statusCode === 'number'
+            ? err.statusCode
+            : err?.type === 'entity.too.large'
+              ? 413
+              : err?.type === 'entity.parse.failed'
+                ? 400
+                : 500;
+      const mensaje =
+        status === 413
+          ? 'El envío supera el tamaño máximo permitido por solicitud. Divide el archivo o usa una versión más liviana.'
+          : status === 400 && err?.type === 'entity.parse.failed'
+            ? 'El cuerpo JSON de la solicitud es inválido.'
+            : err?.message || 'Error interno procesando solicitud API';
+      if (!res.headersSent) {
+        res.status(status).json({ exito: false, error: mensaje });
+      }
+    }
+  );
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        ws: false,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
     app.use(express.static('dist'));
-    app.get('*', (_req, res) => {
+    app.get('/{*splat}', (req, res) => {
+      if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ exito: false, error: 'Ruta API no encontrada' });
+      }
       res.sendFile('dist/index.html', { root: '.' });
     });
   }

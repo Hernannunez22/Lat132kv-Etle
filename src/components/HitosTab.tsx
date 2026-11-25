@@ -52,11 +52,11 @@ export const HitosTab: React.FC = () => {
   return (
     <div className="space-y-4">
       {/* Top Banner Bento */}
-      <div className="bento-card p-5 bg-gradient-to-br from-slate-900 via-slate-900 to-amber-950/30 border-amber-800/40">
+      <div className="bento-card p-3 sm:p-5 bg-gradient-to-br from-slate-900 via-slate-900 to-amber-950/30 border-amber-800/40">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 mb-3 border-b border-slate-800">
-          <div className="flex items-center gap-2.5">
-            <span className="text-xl">⏳</span>
-            <div>
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="text-xl shrink-0">⏳</span>
+            <div className="min-w-0">
               <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400">
                 Cronograma Maestro de Hitos Contractuales
               </h3>
@@ -67,7 +67,7 @@ export const HitosTab: React.FC = () => {
           </div>
           <button 
             onClick={() => setIsHitosModalOpen(true)}
-            className="px-3.5 py-1.5 bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-800/80 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer self-start sm:self-auto"
+            className="px-3.5 py-1.5 bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-800/80 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer self-start sm:self-auto shrink-0 whitespace-nowrap"
           >
             <FolderUp className="w-3.5 h-3.5" />
             <span>Cargar Cronograma (Excel)</span>
@@ -75,7 +75,7 @@ export const HitosTab: React.FC = () => {
         </div>
 
         {/* Filtros de Hitos */}
-        <div className="flex items-center gap-2 overflow-x-auto text-xs pt-1">
+        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar text-xs pt-1">
           <button 
             onClick={() => setFiltroHito('TODOS')} 
             className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-all cursor-pointer font-bold ${
@@ -130,21 +130,21 @@ export const HitosTab: React.FC = () => {
             return (
               <div 
                 key={hito.id} 
-                className="bento-card p-5 space-y-4 border-slate-800/90 bg-slate-900/80 hover:border-amber-700/50"
+                className="bento-card p-3 sm:p-5 space-y-3 sm:space-y-4 border-slate-800/90 bg-slate-900/80 hover:border-amber-700/50"
               >
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
-                  <div className="flex items-center gap-2.5">
-                    <span className="px-2 py-1 rounded bg-slate-800 text-amber-400 font-mono font-extrabold text-xs border border-slate-700">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className="px-2 py-1 rounded bg-slate-800 text-amber-400 font-mono font-extrabold text-xs border border-slate-700 shrink-0">
                       {hito.codigo}
                     </span>
-                    <div>
+                    <div className="min-w-0">
                       <h4 className="text-xs font-bold text-white leading-snug">{hito.nombre}</h4>
                       <p className="text-[11px] text-slate-400">
                         {hito.frente} • Ponderación: <b className="text-sky-400 font-mono">{hito.pesoContractual || '15%'}</b>
                       </p>
                     </div>
                   </div>
-                  <span className={`text-[10px] font-mono font-bold px-2.5 py-1 rounded-full border self-start sm:self-auto ${hito.semaforoColor}`}>
+                  <span className={`text-[10px] font-mono font-bold px-2.5 py-1 rounded-full border self-start sm:self-auto shrink-0 whitespace-nowrap ${hito.semaforoColor}`}>
                     {hito.semaforoEtiqueta}
                   </span>
                 </div>
@@ -165,15 +165,15 @@ export const HitosTab: React.FC = () => {
                       return (
                         <div 
                           key={pIdx} 
-                          className="flex items-center justify-between text-[11px] p-2 rounded-lg bg-slate-950/80 border border-slate-800"
+                          className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 text-[11px] p-2 rounded-lg bg-slate-950/80 border border-slate-800 min-w-0"
                         >
-                          <span className="font-mono text-slate-200 font-bold">{p}</span>
+                          <span className="font-mono text-slate-200 font-bold break-words min-w-0">{p}</span>
                           {isEmitido ? (
-                            <span className="text-[9px] font-bold px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-mono">
+                            <span className="text-[9px] font-bold px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-mono shrink-0 whitespace-nowrap">
                               Emitido (Rev {planoEncontrado?.revision || 'EO'})
                             </span>
                           ) : (
-                            <span className="text-[9px] font-bold px-2 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 font-mono">
+                            <span className="text-[9px] font-bold px-2 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 font-mono shrink-0 whitespace-nowrap">
                               Pendiente ⚠️
                             </span>
                           )}

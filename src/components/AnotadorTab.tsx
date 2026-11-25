@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
+import { apiFetch, readJsonResponse } from '../utils/apiClient';
 import { 
   Search, 
   Mic, 
@@ -9,7 +10,9 @@ import {
   CheckCircle, 
   FileText, 
   Sparkles,
-  Volume2
+  Volume2,
+  Loader2,
+  Plus
 } from 'lucide-react';
 import { buscarYExtraerDePliegosReales } from '../data/pliegosContractuales';
 
@@ -18,6 +21,55 @@ interface FichaData {
   exigenciaPliego: string;
   planoApc: string;
   secuenciaInspeccion: string[];
+  referencias?: string[];
+  fuente?: string;
+}
+
+async function comprimirImagenCampo(file: File): Promise<string> {
+  const rawDataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(String(e.target?.result || ''));
+    reader.onerror = () => reject(new Error('Error leyendo imagen'));
+    reader.readAsDataURL(file);
+  });
+
+  return await new Promise<string>(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const MAX_DIM = 1280;
+      let width = img.naturalWidth || img.width;
+      let height = img.naturalHeight || img.height;
+      if (width > MAX_DIM || height > MAX_DIM) {
+        if (width >= height) {
+          height = Math.round((height * MAX_DIM) / width);
+          width = MAX_DIM;
+        } else {
+          width = Math.round((width * MAX_DIM) / height);
+          height = MAX_DIM;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, width);
+      canvas.height = Math.max(1, height);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(rawDataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      for (const quality of [0.78, 0.65, 0.52, 0.4]) {
+        const out = canvas.toDataURL('image/jpeg', quality);
+        if (out.length <= 380000) {
+          resolve(out);
+          return;
+        }
+      }
+      resolve(canvas.toDataURL('image/jpeg', 0.35));
+    };
+    img.onerror = () => resolve(rawDataUrl);
+    img.src = rawDataUrl;
+  });
 }
 
 export const AnotadorTab: React.FC = () => {
@@ -25,19 +77,25 @@ export const AnotadorTab: React.FC = () => {
     notasCampo, 
     setNotasCampo, 
     fotosCampo, 
-    addFoto, 
+    addFoto,
+    actualizarFotoAnalisis,
     deleteFoto, 
     audiosCampo, 
-    addAudio, 
+    addAudio,
+    actualizarAudioTranscripcion,
     deleteAudio,
-    pliegosReales 
+    pliegosReales,
+    planos,
+    selectedFrenteFilter
   } = useApp();
 
   const [consulta, setConsulta] = useState('');
   const [ficha, setFicha] = useState<FichaData | null>(null);
+  const [isAuditing, setIsAuditing] = useState(false);
   const [isDictatingConsulta, setIsDictatingConsulta] = useState(false);
   const [isDictatingNota, setIsDictatingNota] = useState(false);
   const [isAnalyzingFoto, setIsAnalyzingFoto] = useState(false);
+  const [transcribingAudioId, setTranscribingAudioId] = useState<string | null>(null);
   const [estadoGuardadoNota, setEstadoGuardadoNota] = useState('Guardado automáticamente');
   const [bannerNotice, setBannerNotice] = useState<string | null>(null);
   const [isConfirmingClearNotes, setIsConfirmingClearNotes] = useState(false);
@@ -48,11 +106,12 @@ export const AnotadorTab: React.FC = () => {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recordingStartMsRef = useRef<number>(0);
   const speechRecognitionRef = useRef<any>(null);
 
   const showNotice = (msg: string) => {
     setBannerNotice(msg);
-    setTimeout(() => setBannerNotice(null), 3500);
+    setTimeout(() => setBannerNotice(null), 4000);
   };
 
   // Setup SpeechRecognition
@@ -118,106 +177,126 @@ export const AnotadorTab: React.FC = () => {
     }
   };
 
-  const ejecutarAuditoria = (textoQuery?: string) => {
-    const q = (textoQuery || consulta).toLowerCase().trim();
-    if (!q) return;
+  const ejecutarAuditoria = async (textoQuery?: string) => {
+    const qRaw = (textoQuery || consulta).trim();
+    if (!qRaw) return;
+    const qLower = qRaw.toLowerCase();
 
-    if (q.includes('fundacion') || q.includes('portic') || q.includes('hormig') || q.includes('stub') || q.includes('h25') || q.includes('h-25')) {
-      setFicha({
-        titulo: "Fundaciones de Pórticos y Monobloques H-25 (ET y LAT 132 kV)",
-        exigenciaPliego: "Pliego Técnico General Art. 4.2: Hormigón estructural H-25 (f'c ≥ 250 kg/cm² a 28 días). Asentamiento con Cono de Abrams: 8 a 12 cm. Recubrimiento mínimo de armaduras: 50 mm en contacto con terreno o suelo agresivo. Tiempo mínimo de curado húmedo: 7 días continuos.",
-        planoApc: "Planos Aprobados ET-LE-OC-PL-501 y L-EB-VQ-OC-PL-501 (Rev 0 / Sello APC): Nivelación milimétrica de pernos de anclaje (stubs) con tolerancia máxima en cota ± 3 mm y en verticalidad 1:1000 antes del colado. Prohibido vibrado directo sobre armaduras.",
-        secuenciaInspeccion: [
-          "Verificar cota de fondo de excavación y compactación de suelo con densímetro nuclear (≥ 95% Proctor Modificado).",
-          "Inspeccionar armadura doblada, separadores plásticos de recubrimiento (50 mm) y puesta a tierra de fundación vinculada al stub.",
-          "Verificar nivelación topográfica con estación total de los 4 pernos de anclaje y plantilla rígida fijada.",
-          "Control de pastón de hormigón elaborado: ensayo de asentamiento y moldeo obligatorio de 3 probetas cilíndricas (7, 14 y 28 días).",
-          "Aplicación inmediata de membrana de curado químico o arpillera húmeda tras el desencofrado lateral (mínimo 48 h)."
-        ]
+    setIsAuditing(true);
+    try {
+      const tokens = qLower.split(/\s+/).filter(t => t.length >= 3);
+      const planosRelacionados = planos
+        .filter(p => {
+          const txt = `${p.codigo} ${p.descripcion} ${p.disciplina}`.toLowerCase();
+          return tokens.some(t => txt.includes(t));
+        })
+        .slice(0, 12);
+
+      const res = await apiFetch('/api/anotador/auditar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          consulta: qRaw,
+          frente: selectedFrenteFilter === 'TODOS' ? 'Obra General 132 kV' : selectedFrenteFilter,
+          planosMencionados: planosRelacionados,
+        }),
       });
-    } else if (q.includes('malla') || q.includes('pat') || q.includes('puesta a tierra') || q.includes('resistiv')) {
+      const data = await readJsonResponse(res, 'Error auditando consulta');
+      if (!res.ok || !data?.exito || !data?.dictamen) {
+        throw new Error(data?.error || `Error auditando (HTTP ${res.status})`);
+      }
       setFicha({
-        titulo: "Malla de Puesta a Tierra (PAT) y Medición de Resistividad",
-        exigenciaPliego: "Especificación Técnica TRANSNOA Art. 8: Resistencia combinada de la malla en ET ≤ 0.5 ohms en cualquier época del año. Tensión de paso ≤ 125 V y tensión de contacto ≤ 65 V para corriente de cortocircuito monofásica de 31.5 kA en 0.5 s.",
-        planoApc: "Plano Aprobado ET-LE-OEM-PL-313 / ET-VQ-OEM-PL-313: Conductor de cobre electrolítico desnudo de 95 mm² enterrado a 0.80 m de profundidad con cuadrícula de 10x10 m. Soldaduras cuproaluminotérmicas (tipo Cadweld) en todos los cruces.",
-        secuenciaInspeccion: [
-          "Comprobación de zanja a profundidad reglamentaria (mínimo 80 cm libre).",
-          "Inspección visual de cada disparo de soldadura exotérmica (sin escoria ni porosidades).",
-          "Vinculación de chicotes de cobre a tanques de transformador, seccionadores e interruptores.",
-          "Medición de resistividad aparente con telurímetro de 4 picas (método de Wenner) antes del tapado con tierra vegetal sin piedras."
-        ]
+        titulo: data.dictamen.titulo,
+        exigenciaPliego: data.dictamen.exigenciaPliego,
+        planoApc: data.dictamen.planoApc,
+        secuenciaInspeccion: Array.isArray(data.dictamen.secuenciaInspeccion)
+          ? data.dictamen.secuenciaInspeccion
+          : [],
+        referencias: Array.isArray(data.dictamen.referencias) ? data.dictamen.referencias : [],
+        fuente: String(data.fuente || 'openrouter/free'),
       });
-    } else if (q.includes('cruce') || q.includes('gasoducto') || q.includes('tgn') || q.includes('galibo') || q.includes('ruta')) {
-      setFicha({
-        titulo: "Cruce Especial LAT 132 kV sobre Gasoducto Troncal Norte TGN",
-        exigenciaPliego: "Norma NAG-100 / Res. ENARGAS: Distancia vertical mínima entre el conductor inferior a máxima flecha (temperatura de cálculo +50°C o sobrecarga extraordinaria) y la superficie superior del gasoducto enterrado: ≥ 10.0 metros.",
-        planoApc: "Plano Aprobado L-EB-VQ-OC-PL-011: Vano 42 (Piquetes 42 a 43). El poste P-42 debe ubicarse a no menos de 30 metros de la generatriz del ducto. Instalación obligatoria de descargadores de sobretensión y electrodos de puesta a tierra anódica galvánica para evitar corrosión por inducción electromagnética.",
-        secuenciaInspeccion: [
-          "Relevamiento conjunto en terreno con inspector designado de TGN antes de cualquier movimiento de suelo.",
-          "Sondeo manual cuidadoso para individualizar la tapada real del ducto y su revestimiento anticorrosivo.",
-          "Verificación topográfica de gálibo vertical con distanciador láser y tabla de flechado a temperatura ambiente.",
-          "Acta de inicio y cierre de cruce rubricada por Inspección de Obra y TGN."
-        ]
-      });
-    } else {
-      const extraccion = buscarYExtraerDePliegosReales(q, pliegosReales);
+    } catch {
+      const extraccion = buscarYExtraerDePliegosReales(qLower, pliegosReales);
       if (extraccion.coincidencias.length > 0) {
         const c = extraccion.coincidencias[0];
         setFicha({
           titulo: `Pliego Real: ${c.pliegoNombre}`,
           exigenciaPliego: c.fragmento,
-          planoApc: "Verificado contra documento de pliego real cargado en el sistema.",
+          planoApc: 'Cotejar contra catálogo de planos APC vigente.',
           secuenciaInspeccion: [
-            `Verificar cumplimiento del requerimiento extraído del pliego real.`,
-            `Cotejar con el plano emitido con sello APC (Aprobado para Construcción).`,
-            `Registrar protocolo de inspección en el Libro de Comunicaciones de Obra.`
-          ]
+            'Verificar cumplimiento del requerimiento extraído del pliego real.',
+            'Cotejar con el plano emitido con sello APC (Aprobado para Construcción).',
+            'Registrar protocolo de inspección en el Libro de Comunicaciones de Obra.',
+          ],
+          referencias: [c.pliegoNombre],
+          fuente: 'indice-local',
         });
       } else {
         setFicha({
-          titulo: `Auditoría Técnica: "${textoQuery || consulta}"`,
-          exigenciaPliego: pliegosReales.length > 0 
-            ? "No se hallaron coincidencias directas para esta consulta en tus pliegos reales cargados." 
-            : "No hay pliegos reales cargados. Sube tus documentos con el botón 'Pliegos Reales' en la cabecera.",
-          planoApc: "Planos Aprobados APC: Cualquier desvío de traza, fundación o modelo de equipo respecto al proyecto ejecutivo sellado requiere la previa aprobación por escrito de TRANSNOA mediante Orden de Servicio.",
+          titulo: `Auditoría Técnica: "${qRaw}"`,
+          exigenciaPliego:
+            pliegosReales.length > 0
+              ? 'No se hallaron coincidencias directas para esta consulta en tus pliegos reales cargados.'
+              : 'No hay pliegos reales cargados. Sube tus documentos con el botón "Pliegos Reales".',
+          planoApc: 'Planos Aprobados APC: verificar revisión vigente antes de liberar.',
           secuenciaInspeccion: [
-            "Verificar la vigencia de la última revisión emitida del plano (Rev 0 o APC).",
-            "Comprobar certificados de calidad de fábrica (ensayos de recepción y protocolos de lote).",
-            "Asentar en el Libro de Comunicaciones de Obra el inicio de los trabajos y solicitud de inspección."
-          ]
+            'Verificar la vigencia de la última revisión emitida del plano (Rev 0 o APC).',
+            'Comprobar certificados de calidad de fábrica y ensayos de recepción.',
+            'Asentar en el Libro de Comunicaciones de Obra el inicio de los trabajos.',
+          ],
+          fuente: 'indice-local',
         });
       }
+    } finally {
+      setIsAuditing(false);
     }
   };
 
-  // Manejo de Fotos
-  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Manejo de Fotos con compresión Canvas + análisis Gemini Vision
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
+    const listaFiles = Array.from(files);
+    e.target.value = '';
 
     setIsAnalyzingFoto(true);
-
-    Array.from(files).forEach(file => {
-      const reader = new FileReader();
-      reader.onload = evt => {
+    try {
+      for (const file of listaFiles) {
+        const compressedDataUrl = await comprimirImagenCampo(file);
+        const fotoId = 'foto_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
         addFoto({
-          id: 'foto_' + Date.now() + Math.random(),
+          id: fotoId,
           nombre: file.name,
           fecha: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          dataUrl: evt.target?.result as string
+          dataUrl: compressedDataUrl,
         });
-      };
-      reader.readAsDataURL(file);
-    });
 
-    setTimeout(() => {
+        try {
+          const res = await apiFetch('/api/anotador/analizar-foto', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              dataUrl: compressedDataUrl,
+              nombre: file.name,
+              notaActual: notasCampo,
+            }),
+          });
+          const data = await readJsonResponse(res, 'Error analizando foto');
+          if (res.ok && data?.exito && data?.analisisIA) {
+            actualizarFotoAnalisis(fotoId, String(data.analisisIA));
+          }
+        } catch {
+          // Si está offline, la foto comprimida igual queda guardada y sincronizada
+        }
+      }
+    } catch (err: any) {
+      showNotice(err?.message || 'Error procesando fotografía.');
+    } finally {
       setIsAnalyzingFoto(false);
-    }, 1500);
-
-    e.target.value = '';
+    }
   };
 
-  // Manejo de Audio
+  // Manejo de Audio con fix de duración via ref + transcripción Gemini 3.5 Transcribe
   const toggleGrabacionAudio = async () => {
     if (isRecordingAudio) {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
@@ -238,25 +317,51 @@ export const AnotadorTab: React.FC = () => {
       };
 
       mr.onstop = () => {
-        const blobAudio = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const mime = mr.mimeType || 'audio/webm';
+        const blobAudio = new Blob(audioChunksRef.current, { type: mime });
         stream.getTracks().forEach(t => t.stop());
 
+        const elapsedSec = Math.max(1, Math.round((Date.now() - recordingStartMsRef.current) / 1000));
+        const m = Math.floor(elapsedSec / 60);
+        const s = (elapsedSec % 60).toString().padStart(2, '0');
+        const duracionStr = `${m}:${s}`;
+
         const reader = new FileReader();
-        reader.onloadend = () => {
-          const m = Math.floor(recordingSeconds / 60);
-          const s = (recordingSeconds % 60).toString().padStart(2, '0');
+        reader.onloadend = async () => {
+          const dataUrl = String(reader.result || '');
+          const audioId = 'audio_' + Date.now();
           addAudio({
-            id: 'audio_' + Date.now(),
+            id: audioId,
             fecha: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            duracion: `${m}:${s}`,
-            dataUrl: reader.result as string,
-            transcripcion: "Nota de voz grabada en terreno."
+            duracion: duracionStr,
+            dataUrl,
+            transcripcion: 'Transcribiendo nota de voz con IA...',
           });
           setRecordingSeconds(0);
+
+          setTranscribingAudioId(audioId);
+          try {
+            const res = await apiFetch('/api/anotador/transcribir-audio', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ dataUrl, mimeType: mime }),
+            });
+            const data = await readJsonResponse(res, 'Error transcribiendo audio');
+            if (res.ok && data?.exito && data?.transcripcion) {
+              actualizarAudioTranscripcion(audioId, String(data.transcripcion));
+            } else {
+              actualizarAudioTranscripcion(audioId, 'Audio grabado en terreno (sin transcripción IA).');
+            }
+          } catch {
+            actualizarAudioTranscripcion(audioId, 'Audio grabado en terreno (pendiente de transcripción).');
+          } finally {
+            setTranscribingAudioId(null);
+          }
         };
         reader.readAsDataURL(blobAudio);
       };
 
+      recordingStartMsRef.current = Date.now();
       mr.start();
       mediaRecorderRef.current = mr;
       setIsRecordingAudio(true);
@@ -267,7 +372,7 @@ export const AnotadorTab: React.FC = () => {
       }, 1000);
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      showNotice("No se pudo acceder al micrófono: " + errorMsg);
+      showNotice('No se pudo acceder al micrófono: ' + errorMsg);
     }
   };
 
@@ -286,12 +391,12 @@ export const AnotadorTab: React.FC = () => {
       )}
 
       {/* Search Bar Bento Anotador */}
-      <div className="bento-card p-5 space-y-3.5 border-sky-800/40 bg-gradient-to-br from-slate-900 via-slate-900 to-sky-950/20">
-        <div className="flex items-center justify-between">
+      <div className="bento-card p-3 sm:p-5 space-y-3.5 border-sky-800/40 bg-gradient-to-br from-slate-900 via-slate-900 to-sky-950/20">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5 font-mono">
             <span>📓</span> Auditoría Técnica & Normativa
           </span>
-          <span className="text-[10px] bg-sky-950/80 text-sky-300 border border-sky-800 px-2.5 py-0.5 rounded-full font-mono flex items-center gap-1">
+          <span className="text-[10px] bg-sky-950/80 text-sky-300 border border-sky-800 px-2.5 py-0.5 rounded-full font-mono flex items-center gap-1 shrink-0 whitespace-nowrap">
             <Sparkles className="w-3 h-3 text-sky-400" />
             <span>IA Gemini Flash</span>
           </span>
@@ -326,35 +431,36 @@ export const AnotadorTab: React.FC = () => {
             </button>
             <button 
               onClick={() => ejecutarAuditoria()}
-              className="h-8 w-8 bg-sky-600 hover:bg-sky-500 text-white rounded-lg flex items-center justify-center text-sm font-bold shadow-md active:scale-95 transition-all cursor-pointer"
+              disabled={isAuditing}
+              className="h-8 w-8 bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-white rounded-lg flex items-center justify-center text-sm font-bold shadow-md active:scale-95 transition-all cursor-pointer"
             >
-              <Search className="w-4 h-4" />
+              {isAuditing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
             </button>
           </div>
         </div>
 
         {/* Chips de Búsqueda Rápida */}
-        <div className="flex items-center gap-2 overflow-x-auto pt-1">
+        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pt-1">
           <button 
-            onClick={() => { setConsulta('fundaciones de porticos hormigones H25 y stub'); ejecutarAuditoria('fundaciones de porticos hormigones H25 y stub'); }}
+            onClick={() => { setConsulta('fundaciones de porticos hormigones H25 y stub'); void ejecutarAuditoria('fundaciones de porticos hormigones H25 y stub'); }}
             className="shrink-0 text-xs px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/80 transition-all cursor-pointer"
           >
             🏗️ Fundaciones
           </button>
           <button 
-            onClick={() => { setConsulta('malla de puesta a tierra PAT resistividad y cables'); ejecutarAuditoria('malla de puesta a tierra PAT resistividad y cables'); }}
+            onClick={() => { setConsulta('malla de puesta a tierra PAT resistividad y cables'); void ejecutarAuditoria('malla de puesta a tierra PAT resistividad y cables'); }}
             className="shrink-0 text-xs px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/80 transition-all cursor-pointer"
           >
             ⚡ Malla PAT
           </button>
           <button 
-            onClick={() => { setConsulta('cruce de gasoducto TGN galibos y protecciones'); ejecutarAuditoria('cruce de gasoducto TGN galibos y protecciones'); }}
+            onClick={() => { setConsulta('cruce de gasoducto TGN galibos y protecciones'); void ejecutarAuditoria('cruce de gasoducto TGN galibos y protecciones'); }}
             className="shrink-0 text-xs px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/80 transition-all cursor-pointer"
           >
             🔥 Cruce TGN
           </button>
           <button 
-            onClick={() => { setConsulta('curado y probetas de hormigon tiempo de desencofrado'); ejecutarAuditoria('curado y probetas de hormigon tiempo de desencofrado'); }}
+            onClick={() => { setConsulta('curado y probetas de hormigon tiempo de desencofrado'); void ejecutarAuditoria('curado y probetas de hormigon tiempo de desencofrado'); }}
             className="shrink-0 text-xs px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/80 transition-all cursor-pointer"
           >
             🧪 Ensayos H°
@@ -362,13 +468,25 @@ export const AnotadorTab: React.FC = () => {
         </div>
       </div>
 
+      {isAuditing && (
+        <div className="bento-card p-5 text-center space-y-2 border-sky-800/40 bg-slate-900/90">
+          <Loader2 className="w-6 h-6 animate-spin text-sky-400 mx-auto" />
+          <div className="text-xs font-bold text-white">Consultando Pliegos Reales y planos APC con IA...</div>
+        </div>
+      )}
+
       {/* Ficha Técnica de Inspección */}
-      {ficha && (
+      {ficha && !isAuditing && (
         <div className="space-y-3">
           <div className="flex items-center justify-between px-1">
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
               <FileText className="w-3.5 h-3.5 text-sky-400" />
               <span>Ficha Técnica de Inspección</span>
+              {ficha.fuente && (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-950/70 text-sky-300 border border-sky-800/50 lowercase">
+                  {ficha.fuente}
+                </span>
+              )}
             </h4>
             <button 
               onClick={() => setFicha(null)} 
@@ -378,7 +496,7 @@ export const AnotadorTab: React.FC = () => {
             </button>
           </div>
 
-          <div className="bento-card p-5 text-xs space-y-4 border-sky-800/50 bg-slate-900/90 shadow-xl">
+          <div className="bento-card p-3 sm:p-5 text-xs space-y-4 border-sky-800/50 bg-slate-900/90 shadow-xl">
             <h3 className="text-sm font-extrabold text-sky-300 border-b border-slate-800 pb-2">
               {ficha.titulo}
             </h3>
@@ -387,7 +505,7 @@ export const AnotadorTab: React.FC = () => {
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                 <span>📜</span> Exigencia del Pliego Técnico Contractual:
               </span>
-              <p className="p-3 rounded-xl bg-slate-950/80 border border-slate-800/90 text-slate-300 leading-relaxed font-sans">
+              <p className="p-3 rounded-xl bg-slate-950/80 border border-slate-800/90 text-slate-300 leading-relaxed font-sans whitespace-pre-line">
                 {ficha.exigenciaPliego}
               </p>
             </div>
@@ -414,13 +532,27 @@ export const AnotadorTab: React.FC = () => {
                 ))}
               </div>
             </div>
+
+            {Array.isArray(ficha.referencias) && ficha.referencias.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-800">
+                <span className="text-[10px] text-slate-500 mr-1">Referencias:</span>
+                {ficha.referencias.map((r, rIdx) => (
+                  <span
+                    key={rIdx}
+                    className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] text-slate-300 font-mono"
+                  >
+                    {r}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* Notas Privadas de Campo */}
-      <div className="bento-card p-5 space-y-3">
-        <div className="flex items-center justify-between">
+      <div className="bento-card p-3 sm:p-5 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
             <span>✍️</span> Mis Notas Privadas de Campo
           </h4>
@@ -517,9 +649,9 @@ export const AnotadorTab: React.FC = () => {
           {/* Grilla de Fotos */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {fotosCampo.map(f => (
-              <div key={f.id} className="bento-card p-3 space-y-2 bg-slate-950/90 border-slate-800">
-                <div className="flex justify-between items-center text-[11px]">
-                  <span className="font-bold text-slate-200 truncate max-w-[180px]">{f.nombre}</span>
+              <div key={f.id} className="bento-card p-3 space-y-2 bg-slate-950/90 border-slate-800 min-w-0">
+                <div className="flex justify-between items-center gap-2 text-[11px]">
+                  <span className="font-bold text-slate-200 truncate min-w-0 flex-1">{f.nombre}</span>
                   <div className="flex items-center gap-2">
                     <span className="text-slate-500 font-mono text-[10px]">{f.fecha}</span>
                     <button 
@@ -531,6 +663,29 @@ export const AnotadorTab: React.FC = () => {
                   </div>
                 </div>
                 <img src={f.dataUrl} alt={f.nombre} className="w-full h-36 object-cover rounded-lg" />
+                {f.analisisIA && (
+                  <div className="p-2.5 rounded-lg bg-emerald-950/25 border border-emerald-800/40 text-[11px] text-slate-200 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1">
+                        <Sparkles className="w-3 h-3" /> Inspección IA
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setNotasCampo(
+                            `${notasCampo ? `${notasCampo}\n\n` : ''}[Foto ${f.nombre} - ${f.fecha}]\n${f.analisisIA}`
+                          )
+                        }
+                        className="text-[10px] font-semibold text-sky-300 hover:text-sky-200 flex items-center gap-0.5 cursor-pointer"
+                      >
+                        <Plus className="w-3 h-3" /> Pasar a notas
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-slate-300 whitespace-pre-line leading-relaxed">
+                      {f.analisisIA}
+                    </p>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -560,7 +715,7 @@ export const AnotadorTab: React.FC = () => {
               }`}
             >
               <span className={`w-2.5 h-2.5 rounded-full ${isRecordingAudio ? 'bg-white' : 'bg-rose-500'}`}></span>
-              <span>{isRecordingAudio ? 'Detener y Guardar Grabación' : 'Grabar y Transcribir Nota de Voz'}</span>
+              <span>{isRecordingAudio ? 'Detener y Transcribir' : 'Grabar y Transcribir Nota de Voz'}</span>
             </button>
           </div>
 
@@ -587,6 +742,30 @@ export const AnotadorTab: React.FC = () => {
                     </button>
                   </div>
                   <audio controls src={item.dataUrl} className="w-full h-8" />
+                  {item.transcripcion && (
+                    <div className="p-2 rounded-lg bg-slate-900/90 border border-slate-800 text-[11px] text-slate-200 space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-bold text-sky-400 flex items-center gap-1">
+                          {transcribingAudioId === item.id && <Loader2 className="w-3 h-3 animate-spin" />}
+                          Transcripción IA:
+                        </span>
+                        {transcribingAudioId !== item.id && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setNotasCampo(
+                                `${notasCampo ? `${notasCampo}\n\n` : ''}[Audio ${item.fecha}] ${item.transcripcion}`
+                              )
+                            }
+                            className="text-[10px] font-semibold text-emerald-300 hover:text-emerald-200 flex items-center gap-0.5 cursor-pointer"
+                          >
+                            <Plus className="w-3 h-3" /> Agregar a notas
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-slate-300 leading-relaxed whitespace-pre-line">{item.transcripcion}</p>
+                    </div>
+                  )}
                 </div>
               ))
             )}

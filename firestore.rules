@@ -1,0 +1,1001 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Default-Deny Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() &&
+        request.auth.token.email is string &&
+        request.auth.token.email.lower() == 'hernannunez27@gmail.com';
+    }
+
+    function isInvitedEmailMatch(targetEmail) {
+      return isVerifiedUser() &&
+        request.auth.token.email is string &&
+        targetEmail is string &&
+        (request.auth.token.email == targetEmail || request.auth.token.email.lower() == targetEmail);
+    }
+
+    function isStringBounded(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isStringListBounded(arr, maxItems) {
+      return arr is list && arr.size() <= maxItems && (arr.size() == 0 || arr[0] is string);
+    }
+
+    function isMemberUidList(arr) {
+      return arr is list && arr.size() >= 1 && arr.size() <= 25 && arr[0] is string;
+    }
+
+    function isWorkspaceMember(workspaceId) {
+      return isVerifiedUser() && (
+        isBootstrappedAdmin() ||
+        exists(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid))
+      );
+    }
+
+    function isWorkspaceAdmin(workspaceId) {
+      return isVerifiedUser() && (
+        isBootstrappedAdmin() ||
+        (
+          exists(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)).data.role == 'admin'
+        )
+      );
+    }
+
+    function hasWorkspaceEnvelope(data, workspaceId) {
+      return (
+        isValidId(data.id) &&
+        isValidId(data.workspaceId) &&
+        data.workspaceId == workspaceId &&
+        isStringBounded(data.ownerId, 1, 128) &&
+        isMemberUidList(data.memberUids) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp
+      );
+    }
+
+    function immutableEnvelopePreserved() {
+      return (
+        incoming().id == existing().id &&
+        incoming().workspaceId == existing().workspaceId &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time
+      );
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidUserProfilePrivate(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'lastDevice', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'lastDevice', 'createdAt', 'updatedAt']) &&
+        data.uid == userId &&
+        isStringBounded(data.uid, 1, 128) &&
+        isStringBounded(data.email, 3, 200) &&
+        isStringBounded(data.displayName, 0, 120) &&
+        isStringBounded(data.lastDevice, 0, 120) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspace(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'name', 'ownerId', 'memberUids', 'defaultDriveFolderId',
+          'configApiUrl', 'configR2AccountId', 'configR2Bucket',
+          'notasCampo', 'ultimoInforme', 'megabytesR2', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'name', 'ownerId', 'memberUids', 'defaultDriveFolderId',
+          'configApiUrl', 'configR2AccountId', 'configR2Bucket',
+          'notasCampo', 'ultimoInforme', 'megabytesR2', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == workspaceId &&
+        isStringBounded(data.name, 1, 160) &&
+        isStringBounded(data.ownerId, 1, 128) &&
+        isMemberUidList(data.memberUids) &&
+        isStringBounded(data.defaultDriveFolderId, 0, 128) &&
+        isStringBounded(data.configApiUrl, 0, 500) &&
+        isStringBounded(data.configR2AccountId, 0, 128) &&
+        isStringBounded(data.configR2Bucket, 0, 128) &&
+        isStringBounded(data.notasCampo, 0, 50000) &&
+        isStringBounded(data.ultimoInforme, 0, 150000) &&
+        isStringBounded(data.megabytesR2, 0, 40) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspaceMember(data, workspaceId, memberId) {
+      return data.keys().hasAll(['uid', 'workspaceId', 'role', 'displayName', 'addedBy', 'inviteId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'workspaceId', 'role', 'displayName', 'addedBy', 'inviteId', 'createdAt', 'updatedAt']) &&
+        data.uid == memberId &&
+        isValidId(data.uid) &&
+        data.workspaceId == workspaceId &&
+        isValidId(data.workspaceId) &&
+        (data.role == 'admin' || data.role == 'engineer') &&
+        isStringBounded(data.displayName, 0, 120) &&
+        isStringBounded(data.addedBy, 1, 128) &&
+        isStringBounded(data.inviteId, 0, 128) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspaceInvite(data, workspaceId, inviteId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'invitedEmail', 'role', 'status', 'createdBy', 'acceptedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'invitedEmail', 'role', 'status', 'createdBy', 'acceptedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id == inviteId &&
+        isValidId(data.id) &&
+        data.workspaceId == workspaceId &&
+        isValidId(data.workspaceId) &&
+        isStringBounded(data.invitedEmail, 3, 200) &&
+        (data.role == 'admin' || data.role == 'engineer') &&
+        (data.status == 'pending' || data.status == 'accepted') &&
+        isStringBounded(data.createdBy, 1, 128) &&
+        isStringBounded(data.acceptedByUid, 0, 128) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidHito(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'codigo', 'nombre',
+          'frente', 'fechaObjetivo', 'pesoContractual', 'responsable',
+          'requisitosCriticos', 'planosRequeridos', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'codigo', 'nombre',
+          'frente', 'fechaObjetivo', 'pesoContractual', 'responsable',
+          'requisitosCriticos', 'planosRequeridos', 'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isStringBounded(data.codigo, 0, 64) &&
+        isStringBounded(data.nombre, 1, 300) &&
+        isStringBounded(data.frente, 0, 120) &&
+        isStringBounded(data.fechaObjetivo, 0, 32) &&
+        isStringBounded(data.pesoContractual, 0, 80) &&
+        isStringBounded(data.responsable, 0, 160) &&
+        isStringListBounded(data.requisitosCriticos, 40) &&
+        isStringListBounded(data.planosRequeridos, 40);
+    }
+
+    function isValidPlano(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'codigo', 'descripcion',
+          'disciplina', 'revision', 'proyecto', 'estado', 'selloApc',
+          'urlDrive', 'urlR2', 'fecha', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'codigo', 'descripcion',
+          'disciplina', 'revision', 'proyecto', 'estado', 'selloApc',
+          'urlDrive', 'urlR2', 'fecha', 'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isStringBounded(data.codigo, 1, 80) &&
+        isStringBounded(data.descripcion, 0, 400) &&
+        isStringBounded(data.disciplina, 0, 120) &&
+        isStringBounded(data.revision, 0, 32) &&
+        isStringBounded(data.proyecto, 0, 120) &&
+        isStringBounded(data.estado, 0, 64) &&
+        data.selloApc is bool &&
+        isStringBounded(data.urlDrive, 0, 500) &&
+        isStringBounded(data.urlR2, 0, 500) &&
+        isStringBounded(data.fecha, 0, 40);
+    }
+
+    function isValidInterferencia(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'empresa', 'tipoInterferencia',
+          'normativa', 'estadoTramite', 'vanosAfectados', 'faltantes',
+          'carpetaNombre', 'carpetaDriveId', 'archivoSolicitudNombre', 'archivoSolicitudId',
+          'archivoSolicitudUrl', 'fechaDocumento', 'resumenSolicitud', 'origen',
+          'archivosCarpetaCount', 'documentosLeidos', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'empresa', 'tipoInterferencia',
+          'normativa', 'estadoTramite', 'vanosAfectados', 'faltantes',
+          'carpetaNombre', 'carpetaDriveId', 'archivoSolicitudNombre', 'archivoSolicitudId',
+          'archivoSolicitudUrl', 'fechaDocumento', 'resumenSolicitud', 'origen',
+          'archivosCarpetaCount', 'documentosLeidos', 'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isStringBounded(data.empresa, 1, 200) &&
+        isStringBounded(data.tipoInterferencia, 0, 300) &&
+        isStringBounded(data.normativa, 0, 200) &&
+        isStringBounded(data.estadoTramite, 1, 80) &&
+        isStringBounded(data.vanosAfectados, 0, 300) &&
+        isStringListBounded(data.faltantes, 50) &&
+        isStringBounded(data.carpetaNombre, 0, 200) &&
+        isStringBounded(data.carpetaDriveId, 0, 128) &&
+        isStringBounded(data.archivoSolicitudNombre, 0, 260) &&
+        isStringBounded(data.archivoSolicitudId, 0, 128) &&
+        isStringBounded(data.archivoSolicitudUrl, 0, 500) &&
+        isStringBounded(data.fechaDocumento, 0, 64) &&
+        isStringBounded(data.resumenSolicitud, 0, 4000) &&
+        isStringBounded(data.origen, 0, 40) &&
+        data.archivosCarpetaCount is number &&
+        data.archivosCarpetaCount >= 0 &&
+        isStringListBounded(data.documentosLeidos, 20);
+    }
+
+    function isValidPliego(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'nombre', 'tipoMime',
+          'tamanioBytes', 'tamanioTexto', 'fechaSubida', 'resumen', 'paginas',
+          'caracteresTexto', 'esEscaneado', 'tiempoProcesoMs',
+          'contenidoTextoPreview', 'chunkCount', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'nombre', 'tipoMime',
+          'tamanioBytes', 'tamanioTexto', 'fechaSubida', 'resumen', 'paginas',
+          'caracteresTexto', 'esEscaneado', 'tiempoProcesoMs',
+          'contenidoTextoPreview', 'chunkCount', 'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isStringBounded(data.nombre, 1, 260) &&
+        isStringBounded(data.tipoMime, 0, 160) &&
+        data.tamanioBytes is number &&
+        isStringBounded(data.tamanioTexto, 0, 40) &&
+        isStringBounded(data.fechaSubida, 0, 64) &&
+        isStringBounded(data.resumen, 0, 2000) &&
+        data.paginas is number &&
+        data.caracteresTexto is number &&
+        data.esEscaneado is bool &&
+        data.tiempoProcesoMs is number &&
+        isStringBounded(data.contenidoTextoPreview, 0, 150000) &&
+        data.chunkCount is number;
+    }
+
+    function isValidPliegoChunk(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'pliegoId',
+          'chunkIndex', 'contenidoTexto', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'pliegoId',
+          'chunkIndex', 'contenidoTexto', 'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isValidId(data.pliegoId) &&
+        data.chunkIndex is number &&
+        data.chunkIndex >= 0 &&
+        data.chunkIndex <= 24 &&
+        isStringBounded(data.contenidoTexto, 0, 400000);
+    }
+
+    function isValidMinuta(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'codigo', 'titulo',
+          'fechaReunion', 'frente', 'participantes', 'origen', 'nombreArchivo',
+          'driveFileId', 'driveUrl', 'driveRuta', 'driveModifiedTime',
+          'resumen', 'contenidoTexto', 'fechaCarga', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'codigo', 'titulo',
+          'fechaReunion', 'frente', 'participantes', 'origen', 'nombreArchivo',
+          'driveFileId', 'driveUrl', 'driveRuta', 'driveModifiedTime',
+          'resumen', 'contenidoTexto', 'fechaCarga', 'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isStringBounded(data.codigo, 0, 80) &&
+        isStringBounded(data.titulo, 1, 300) &&
+        isStringBounded(data.fechaReunion, 0, 32) &&
+        isStringBounded(data.frente, 0, 120) &&
+        isStringBounded(data.participantes, 0, 600) &&
+        (data.origen == 'drive' || data.origen == 'archivo' || data.origen == 'texto' || data.origen == 'manual') &&
+        isStringBounded(data.nombreArchivo, 0, 260) &&
+        isStringBounded(data.driveFileId, 0, 128) &&
+        isStringBounded(data.driveUrl, 0, 500) &&
+        isStringBounded(data.driveRuta, 0, 400) &&
+        isStringBounded(data.driveModifiedTime, 0, 64) &&
+        isStringBounded(data.resumen, 0, 4000) &&
+        isStringBounded(data.contenidoTexto, 0, 150000) &&
+        isStringBounded(data.fechaCarga, 0, 64);
+    }
+
+    function isValidCompromiso(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'minutaId', 'minutaCodigo',
+          'minutaFecha', 'numeroItem', 'descripcion', 'responsable', 'area',
+          'frente', 'fechaLimite', 'estado', 'observaciones',
+          'documentosRelacionados', 'notasPedidoIds', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'minutaId', 'minutaCodigo',
+          'minutaFecha', 'numeroItem', 'descripcion', 'responsable', 'area',
+          'frente', 'fechaLimite', 'estado', 'observaciones',
+          'documentosRelacionados', 'notasPedidoIds', 'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isStringBounded(data.minutaId, 0, 128) &&
+        isStringBounded(data.minutaCodigo, 0, 80) &&
+        isStringBounded(data.minutaFecha, 0, 32) &&
+        isStringBounded(data.numeroItem, 0, 40) &&
+        isStringBounded(data.descripcion, 1, 2000) &&
+        isStringBounded(data.responsable, 0, 160) &&
+        isStringBounded(data.area, 0, 120) &&
+        isStringBounded(data.frente, 0, 120) &&
+        isStringBounded(data.fechaLimite, 0, 32) &&
+        (data.estado == 'PENDIENTE' || data.estado == 'EN_CURSO' || data.estado == 'CUMPLIDO' || data.estado == 'INCUMPLIDO') &&
+        isStringBounded(data.observaciones, 0, 2000) &&
+        isStringListBounded(data.documentosRelacionados, 30) &&
+        isStringListBounded(data.notasPedidoIds, 30);
+    }
+
+    function isValidNotaPedido(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'numeroNota', 'fechaEmision',
+          'emisor', 'destinatario', 'frente', 'asunto', 'plazoDescargoDias',
+          'compromisoIds', 'minutasReferenciadas', 'contenidoMarkdown',
+          'fuenteGeneracion', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'numeroNota', 'fechaEmision',
+          'emisor', 'destinatario', 'frente', 'asunto', 'plazoDescargoDias',
+          'compromisoIds', 'minutasReferenciadas', 'contenidoMarkdown',
+          'fuenteGeneracion', 'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isStringBounded(data.numeroNota, 1, 80) &&
+        isStringBounded(data.fechaEmision, 0, 32) &&
+        isStringBounded(data.emisor, 0, 200) &&
+        isStringBounded(data.destinatario, 0, 200) &&
+        isStringBounded(data.frente, 0, 120) &&
+        isStringBounded(data.asunto, 0, 400) &&
+        data.plazoDescargoDias is number &&
+        data.plazoDescargoDias >= 1 &&
+        isStringListBounded(data.compromisoIds, 50) &&
+        isStringListBounded(data.minutasReferenciadas, 30) &&
+        isStringBounded(data.contenidoMarkdown, 1, 150000) &&
+        isStringBounded(data.fuenteGeneracion, 0, 80);
+    }
+
+    function isValidFotoCampo(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'nombre', 'fecha', 'dataUrl', 'analisisIA', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'nombre', 'fecha', 'dataUrl', 'analisisIA', 'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isStringBounded(data.nombre, 1, 200) &&
+        isStringBounded(data.fecha, 0, 64) &&
+        isStringBounded(data.dataUrl, 1, 450000) &&
+        isStringBounded(data.analisisIA, 0, 4000);
+    }
+
+    function isValidNotaAudio(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'fecha', 'duracion', 'dataUrl', 'transcripcion', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'fecha', 'duracion', 'dataUrl', 'transcripcion', 'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isStringBounded(data.fecha, 0, 64) &&
+        isStringBounded(data.duracion, 0, 32) &&
+        isStringBounded(data.dataUrl, 1, 450000) &&
+        isStringBounded(data.transcripcion, 0, 10000);
+    }
+
+    function isValidChatAdjunto(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'nombre', 'tipoMime',
+          'tamanioBytes', 'tamanioTexto', 'fechaSubida', 'paginas', 'caracteresTexto',
+          'esEscaneado', 'tiempoProcesoMs', 'metricasDetectadas', 'contenidoTexto',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'nombre', 'tipoMime',
+          'tamanioBytes', 'tamanioTexto', 'fechaSubida', 'paginas', 'caracteresTexto',
+          'esEscaneado', 'tiempoProcesoMs', 'metricasDetectadas', 'contenidoTexto',
+          'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isStringBounded(data.nombre, 1, 260) &&
+        isStringBounded(data.tipoMime, 0, 160) &&
+        data.tamanioBytes is number &&
+        isStringBounded(data.tamanioTexto, 0, 40) &&
+        isStringBounded(data.fechaSubida, 0, 64) &&
+        data.paginas is number &&
+        data.caracteresTexto is number &&
+        data.esEscaneado is bool &&
+        data.tiempoProcesoMs is number &&
+        isStringListBounded(data.metricasDetectadas, 40) &&
+        isStringBounded(data.contenidoTexto, 0, 150000);
+    }
+
+    function isValidNotaLibro(data, workspaceId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'codigo', 'tipoNota', 'titulo',
+          'fecha', 'actorEmisor', 'emisorDetalle', 'actorReceptor', 'receptorDetalle',
+          'sentido', 'frente', 'referenciasNotas', 'respondeANotas', 'respondidaPorNotas',
+          'estadoRespuesta', 'preguntasOPuntos', 'respuestasODescargos', 'resumen',
+          'contenidoTexto', 'origen', 'nombreArchivo', 'driveFileId', 'driveUrl',
+          'driveRuta', 'driveModifiedTime', 'fechaCarga', 'manualOverride', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'codigo', 'tipoNota', 'titulo',
+          'fecha', 'actorEmisor', 'emisorDetalle', 'actorReceptor', 'receptorDetalle',
+          'sentido', 'frente', 'referenciasNotas', 'respondeANotas', 'respondidaPorNotas',
+          'estadoRespuesta', 'preguntasOPuntos', 'respuestasODescargos', 'resumen',
+          'contenidoTexto', 'origen', 'nombreArchivo', 'driveFileId', 'driveUrl',
+          'driveRuta', 'driveModifiedTime', 'fechaCarga', 'manualOverride', 'createdAt', 'updatedAt'
+        ]) &&
+        hasWorkspaceEnvelope(data, workspaceId) &&
+        isStringBounded(data.codigo, 1, 80) &&
+        isStringBounded(data.tipoNota, 1, 60) &&
+        isStringBounded(data.titulo, 1, 300) &&
+        isStringBounded(data.fecha, 0, 32) &&
+        isStringBounded(data.actorEmisor, 1, 80) &&
+        isStringBounded(data.emisorDetalle, 0, 200) &&
+        isStringBounded(data.actorReceptor, 1, 80) &&
+        isStringBounded(data.receptorDetalle, 0, 200) &&
+        (data.sentido == 'pregunta_solicitud' || data.sentido == 'respuesta_devolucion' || data.sentido == 'intimacion_observacion' || data.sentido == 'informativa') &&
+        isStringBounded(data.frente, 0, 120) &&
+        isStringListBounded(data.referenciasNotas, 40) &&
+        isStringListBounded(data.respondeANotas, 40) &&
+        isStringListBounded(data.respondidaPorNotas, 40) &&
+        (data.estadoRespuesta == 'CONTESTADA' || data.estadoRespuesta == 'PARCIALMENTE_CONTESTADA' || data.estadoRespuesta == 'SIN_RESPUESTA' || data.estadoRespuesta == 'CON_DISCREPANCIA' || data.estadoRespuesta == 'INFORMATIVA') &&
+        isStringListBounded(data.preguntasOPuntos, 40) &&
+        isStringListBounded(data.respuestasODescargos, 40) &&
+        isStringBounded(data.resumen, 0, 4000) &&
+        isStringBounded(data.contenidoTexto, 0, 150000) &&
+        (data.origen == 'drive' || data.origen == 'archivo' || data.origen == 'texto') &&
+        isStringBounded(data.nombreArchivo, 0, 260) &&
+        isStringBounded(data.driveFileId, 0, 128) &&
+        isStringBounded(data.driveUrl, 0, 500) &&
+        isStringBounded(data.driveRuta, 0, 400) &&
+        isStringBounded(data.driveModifiedTime, 0, 64) &&
+        isStringBounded(data.fechaCarga, 0, 64) &&
+        data.manualOverride is bool;
+    }
+
+    function isValidWorkspaceIAControl(data, workspaceId, docId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'modelosPagosHabilitados',
+          'updatedByEmail', 'updatedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'modelosPagosHabilitados',
+          'updatedByEmail', 'updatedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        docId == 'ia_control' &&
+        isValidId(data.id) &&
+        data.id == docId &&
+        isValidId(data.workspaceId) &&
+        data.workspaceId == workspaceId &&
+        data.modelosPagosHabilitados is bool &&
+        isStringBounded(data.updatedByEmail, 3, 200) &&
+        isStringBounded(data.updatedByUid, 1, 128) &&
+        data.updatedByUid == request.auth.uid &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // 4. Health-check doc for startup connection check
+    match /test/{docId} {
+      allow get: if isSignedIn() && isValidId(docId);
+      allow list, create, update, delete: if false;
+    }
+
+    // 5. Private PII User Profiles (Split Collection)
+    match /users/{userId}/private/{docId} {
+      allow get: if isOwner(userId) && isValidId(userId) && isValidId(docId);
+      allow list: if isVerifiedUser() && existing().uid == request.auth.uid;
+      allow create: if isOwner(userId) && isValidId(userId) && isValidId(docId) &&
+        isValidUserProfilePrivate(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isOwner(userId) && isValidId(userId) && isValidId(docId) &&
+        isValidUserProfilePrivate(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'lastDevice', 'updatedAt']);
+      allow delete: if isOwner(userId) && isValidId(userId) && isValidId(docId);
+    }
+
+    // 6. Workspaces & Master Gate Subcollections
+    match /workspaces/{workspaceId} {
+      allow get: if isValidId(workspaceId) && isWorkspaceMember(workspaceId);
+      allow list: if isVerifiedUser() && (
+        isBootstrappedAdmin() ||
+        existing().ownerId == request.auth.uid ||
+        request.auth.uid in existing().memberUids
+      );
+      allow create: if isVerifiedUser() && isValidId(workspaceId) &&
+        isValidWorkspace(incoming(), workspaceId) &&
+        incoming().ownerId == request.auth.uid &&
+        request.auth.uid in incoming().memberUids &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(workspaceId) &&
+        isValidWorkspace(incoming(), workspaceId) &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          (
+            isWorkspaceAdmin(workspaceId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'memberUids', 'defaultDriveFolderId', 'configApiUrl',
+              'configR2AccountId', 'configR2Bucket', 'notasCampo',
+              'ultimoInforme', 'megabytesR2', 'updatedAt'
+            ])
+          ) ||
+          (
+            isWorkspaceMember(workspaceId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'notasCampo', 'ultimoInforme', 'megabytesR2', 'updatedAt'
+            ])
+          ) ||
+          (
+            isVerifiedUser() &&
+            existsAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)) &&
+            request.auth.uid in incoming().memberUids &&
+            incoming().memberUids.hasAll(existing().memberUids) &&
+            incoming().memberUids.size() <= existing().memberUids.size() + 1 &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(workspaceId) && isWorkspaceAdmin(workspaceId);
+
+      // Members Subcollection (Master Gate source of truth)
+      match /members/{memberId} {
+        allow get: if isValidId(workspaceId) && isValidId(memberId) && (
+          isWorkspaceMember(workspaceId) ||
+          (isVerifiedUser() && request.auth.uid == memberId)
+        );
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().uid == request.auth.uid
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(memberId) &&
+          isValidWorkspaceMember(incoming(), workspaceId, memberId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/workspaces/$(workspaceId)) &&
+          (
+            isBootstrappedAdmin() ||
+            get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId == request.auth.uid ||
+            (
+              memberId == request.auth.uid &&
+              incoming().role == 'engineer' &&
+              isValidId(incoming().inviteId) &&
+              exists(/databases/$(database)/documents/workspaces/$(workspaceId)/invites/$(incoming().inviteId)) &&
+              isInvitedEmailMatch(get(/databases/$(database)/documents/workspaces/$(workspaceId)/invites/$(incoming().inviteId)).data.invitedEmail) &&
+              get(/databases/$(database)/documents/workspaces/$(workspaceId)/invites/$(incoming().inviteId)).data.status == 'pending'
+            )
+          );
+        allow update: if isValidId(workspaceId) && isValidId(memberId) &&
+          isValidWorkspaceMember(incoming(), workspaceId, memberId) &&
+          isWorkspaceAdmin(workspaceId) &&
+          incoming().uid == existing().uid &&
+          incoming().workspaceId == existing().workspaceId &&
+          incoming().addedBy == existing().addedBy &&
+          incoming().inviteId == existing().inviteId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['role', 'displayName', 'updatedAt']);
+        allow delete: if isValidId(workspaceId) && isValidId(memberId) && isWorkspaceAdmin(workspaceId);
+      }
+
+      // Invites Subcollection (PII-scoped + terminal state lock on accepted)
+      match /invites/{inviteId} {
+        allow get: if isValidId(workspaceId) && isValidId(inviteId) && (
+          isWorkspaceAdmin(workspaceId) ||
+          isInvitedEmailMatch(existing().invitedEmail)
+        );
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().createdBy == request.auth.uid ||
+          isInvitedEmailMatch(existing().invitedEmail)
+        );
+        allow create: if isValidId(workspaceId) && isValidId(inviteId) &&
+          isValidWorkspaceInvite(incoming(), workspaceId, inviteId) &&
+          isWorkspaceAdmin(workspaceId) &&
+          incoming().createdBy == request.auth.uid &&
+          incoming().status == 'pending' &&
+          incoming().acceptedByUid == '' &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/workspaces/$(workspaceId));
+        allow update: if isValidId(workspaceId) && isValidId(inviteId) &&
+          isValidWorkspaceInvite(incoming(), workspaceId, inviteId) &&
+          incoming().id == existing().id &&
+          incoming().workspaceId == existing().workspaceId &&
+          incoming().invitedEmail == existing().invitedEmail &&
+          incoming().createdBy == existing().createdBy &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            (
+              isWorkspaceAdmin(workspaceId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status', 'acceptedByUid', 'updatedAt'])
+            ) ||
+            (
+              isVerifiedUser() &&
+              existing().status == 'pending' &&
+              isInvitedEmailMatch(existing().invitedEmail) &&
+              incoming().role == existing().role &&
+              incoming().status == 'accepted' &&
+              incoming().acceptedByUid == request.auth.uid &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'acceptedByUid', 'updatedAt'])
+            )
+          );
+        allow delete: if isValidId(workspaceId) && isValidId(inviteId) && isWorkspaceAdmin(workspaceId);
+      }
+
+      // Hitos Subcollection
+      match /hitos/{hitoId} {
+        allow get: if isValidId(workspaceId) && isValidId(hitoId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(hitoId) &&
+          isValidHito(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId);
+        allow update: if isValidId(workspaceId) && isValidId(hitoId) &&
+          isValidHito(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'memberUids', 'codigo', 'nombre', 'frente', 'fechaObjetivo',
+            'pesoContractual', 'responsable', 'requisitosCriticos',
+            'planosRequeridos', 'updatedAt'
+          ]);
+        allow delete: if isValidId(workspaceId) && isValidId(hitoId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Planos Subcollection
+      match /planos/{planoId} {
+        allow get: if isValidId(workspaceId) && isValidId(planoId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(planoId) &&
+          isValidPlano(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId);
+        allow update: if isValidId(workspaceId) && isValidId(planoId) &&
+          isValidPlano(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'memberUids', 'codigo', 'descripcion', 'disciplina', 'revision',
+            'proyecto', 'estado', 'selloApc', 'urlDrive', 'urlR2', 'fecha', 'updatedAt'
+          ]);
+        allow delete: if isValidId(workspaceId) && isValidId(planoId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Interferencias Subcollection (Real Drive crossing data)
+      match /interferencias/{interferenciaId} {
+        allow get: if isValidId(workspaceId) && isValidId(interferenciaId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(interferenciaId) &&
+          isValidInterferencia(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId);
+        allow update: if isValidId(workspaceId) && isValidId(interferenciaId) &&
+          isValidInterferencia(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'memberUids', 'empresa', 'tipoInterferencia', 'normativa', 'estadoTramite',
+            'vanosAfectados', 'faltantes', 'carpetaNombre', 'carpetaDriveId',
+            'archivoSolicitudNombre', 'archivoSolicitudId', 'archivoSolicitudUrl',
+            'fechaDocumento', 'resumenSolicitud', 'origen', 'archivosCarpetaCount',
+            'documentosLeidos', 'updatedAt'
+          ]);
+        allow delete: if isValidId(workspaceId) && isValidId(interferenciaId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Pliegos Subcollection
+      match /pliegos/{pliegoId} {
+        allow get: if isValidId(workspaceId) && isValidId(pliegoId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(pliegoId) &&
+          isValidPliego(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId);
+        allow update: if isValidId(workspaceId) && isValidId(pliegoId) &&
+          isValidPliego(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'memberUids', 'nombre', 'tipoMime', 'tamanioBytes', 'tamanioTexto',
+            'fechaSubida', 'resumen', 'paginas', 'caracteresTexto', 'esEscaneado',
+            'tiempoProcesoMs', 'contenidoTextoPreview', 'chunkCount', 'updatedAt'
+          ]);
+        allow delete: if isValidId(workspaceId) && isValidId(pliegoId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Pliego Chunks Subcollection
+      match /pliego_chunks/{chunkId} {
+        allow get: if isValidId(workspaceId) && isValidId(chunkId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(chunkId) &&
+          isValidPliegoChunk(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId) &&
+          exists(/databases/$(database)/documents/workspaces/$(workspaceId)/pliegos/$(incoming().pliegoId));
+        allow update: if isValidId(workspaceId) && isValidId(chunkId) &&
+          isValidPliegoChunk(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().pliegoId == existing().pliegoId &&
+          incoming().chunkIndex == existing().chunkIndex &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'contenidoTexto', 'updatedAt']);
+        allow delete: if isValidId(workspaceId) && isValidId(chunkId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Minutas Subcollection
+      match /minutas/{minutaId} {
+        allow get: if isValidId(workspaceId) && isValidId(minutaId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(minutaId) &&
+          isValidMinuta(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId);
+        allow update: if isValidId(workspaceId) && isValidId(minutaId) &&
+          isValidMinuta(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'memberUids', 'codigo', 'titulo', 'fechaReunion', 'frente',
+            'participantes', 'origen', 'nombreArchivo', 'driveFileId', 'driveUrl',
+            'driveRuta', 'driveModifiedTime', 'resumen', 'contenidoTexto',
+            'fechaCarga', 'updatedAt'
+          ]);
+        allow delete: if isValidId(workspaceId) && isValidId(minutaId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Compromisos Subcollection
+      match /compromisos/{compromisoId} {
+        allow get: if isValidId(workspaceId) && isValidId(compromisoId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(compromisoId) &&
+          isValidCompromiso(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId);
+        allow update: if isValidId(workspaceId) && isValidId(compromisoId) &&
+          isValidCompromiso(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'memberUids', 'minutaId', 'minutaCodigo', 'minutaFecha', 'numeroItem',
+            'descripcion', 'responsable', 'area', 'frente', 'fechaLimite',
+            'estado', 'observaciones', 'documentosRelacionados',
+            'notasPedidoIds', 'updatedAt'
+          ]);
+        allow delete: if isValidId(workspaceId) && isValidId(compromisoId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Notas de Pedido Subcollection
+      match /notas_pedido/{notaId} {
+        allow get: if isValidId(workspaceId) && isValidId(notaId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(notaId) &&
+          isValidNotaPedido(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId);
+        allow update: if isValidId(workspaceId) && isValidId(notaId) &&
+          isValidNotaPedido(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'memberUids', 'numeroNota', 'fechaEmision', 'emisor', 'destinatario',
+            'frente', 'asunto', 'plazoDescargoDias', 'compromisoIds',
+            'minutasReferenciadas', 'contenidoMarkdown', 'fuenteGeneracion', 'updatedAt'
+          ]);
+        allow delete: if isValidId(workspaceId) && isValidId(notaId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Fotos Campo Subcollection
+      match /fotos_campo/{fotoId} {
+        allow get: if isValidId(workspaceId) && isValidId(fotoId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(fotoId) &&
+          isValidFotoCampo(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId);
+        allow update: if isValidId(workspaceId) && isValidId(fotoId) &&
+          isValidFotoCampo(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'nombre', 'fecha', 'dataUrl', 'analisisIA', 'updatedAt']);
+        allow delete: if isValidId(workspaceId) && isValidId(fotoId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Audios Campo Subcollection
+      match /audios_campo/{audioId} {
+        allow get: if isValidId(workspaceId) && isValidId(audioId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(audioId) &&
+          isValidNotaAudio(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId);
+        allow update: if isValidId(workspaceId) && isValidId(audioId) &&
+          isValidNotaAudio(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'fecha', 'duracion', 'dataUrl', 'transcripcion', 'updatedAt']);
+        allow delete: if isValidId(workspaceId) && isValidId(audioId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Chat Adjuntos PDF Subcollection
+      match /chat_adjuntos/{adjuntoId} {
+        allow get: if isValidId(workspaceId) && isValidId(adjuntoId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(adjuntoId) &&
+          isValidChatAdjunto(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId);
+        allow update: if isValidId(workspaceId) && isValidId(adjuntoId) &&
+          isValidChatAdjunto(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'memberUids', 'nombre', 'tipoMime', 'tamanioBytes', 'tamanioTexto',
+            'fechaSubida', 'paginas', 'caracteresTexto', 'esEscaneado',
+            'tiempoProcesoMs', 'metricasDetectadas', 'contenidoTexto', 'updatedAt'
+          ]);
+        allow delete: if isValidId(workspaceId) && isValidId(adjuntoId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Notas de Libro Subcollection (Libro de Comunicaciones con Actores y Q&A)
+      match /notas_libro/{notaLibroId} {
+        allow get: if isValidId(workspaceId) && isValidId(notaLibroId) && isWorkspaceMember(workspaceId);
+        allow list: if isVerifiedUser() && (
+          isBootstrappedAdmin() ||
+          existing().ownerId == request.auth.uid ||
+          request.auth.uid in existing().memberUids
+        );
+        allow create: if isVerifiedUser() && isValidId(workspaceId) && isValidId(notaLibroId) &&
+          isValidNotaLibro(incoming(), workspaceId) &&
+          incoming().ownerId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceMember(workspaceId);
+        allow update: if isValidId(workspaceId) && isValidId(notaLibroId) &&
+          isValidNotaLibro(incoming(), workspaceId) &&
+          isWorkspaceMember(workspaceId) &&
+          immutableEnvelopePreserved() &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'memberUids', 'codigo', 'tipoNota', 'titulo', 'fecha',
+            'actorEmisor', 'emisorDetalle', 'actorReceptor', 'receptorDetalle',
+            'sentido', 'frente', 'referenciasNotas', 'respondeANotas', 'respondidaPorNotas',
+            'estadoRespuesta', 'preguntasOPuntos', 'respuestasODescargos', 'resumen',
+            'contenidoTexto', 'origen', 'nombreArchivo', 'driveFileId', 'driveUrl',
+            'driveRuta', 'driveModifiedTime', 'fechaCarga', 'manualOverride', 'updatedAt'
+          ]);
+        allow delete: if isValidId(workspaceId) && isValidId(notaLibroId) && isWorkspaceMember(workspaceId);
+      }
+
+      // Master AI Control Policy Subcollection (writable strictly by bootstrapped master admin)
+      match /config/{docId} {
+        allow get: if isValidId(workspaceId) && isValidId(docId) && docId == 'ia_control' && isWorkspaceMember(workspaceId);
+        allow list: if false;
+        allow create: if isValidId(workspaceId) && isValidId(docId) &&
+          docId == 'ia_control' &&
+          isBootstrappedAdmin() &&
+          isValidWorkspaceIAControl(incoming(), workspaceId, docId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/workspaces/$(workspaceId));
+        allow update: if isValidId(workspaceId) && isValidId(docId) &&
+          docId == 'ia_control' &&
+          isBootstrappedAdmin() &&
+          isValidWorkspaceIAControl(incoming(), workspaceId, docId) &&
+          incoming().id == existing().id &&
+          incoming().workspaceId == existing().workspaceId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'modelosPagosHabilitados', 'updatedByEmail', 'updatedByUid', 'updatedAt'
+          ]);
+        allow delete: if isValidId(workspaceId) && isValidId(docId) && docId == 'ia_control' && isBootstrappedAdmin();
+      }
+    }
+  }
+}

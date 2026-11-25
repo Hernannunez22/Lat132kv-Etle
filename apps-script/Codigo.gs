@@ -290,8 +290,9 @@ function responderChatIA(mensaje, historial) {
   // Motor analítico local con datos reales de la hoja
   if (q.includes("plano") || q.includes("avance") || q.includes("emitido")) {
     const apc = planos.filter(function(p){ return p.selloApc; }).length;
-    const pct = ((planos.length / 910) * 100).toFixed(1);
-    return "📊 **Estado de Planos en Planilla:**\n- **Emitidos:** " + planos.length + " / 910 planificados (" + pct + "% de avance).\n- **Aprobados APC:** " + apc + " planos.\n- Repositorio activo y sincronizado en Cloudflare R2.";
+    const totalElenco = 543;
+    const pct = ((planos.length / totalElenco) * 100).toFixed(1);
+    return "📊 **Estado de Planos en Planilla:**\n- **Emitidos:** " + planos.length + " / " + totalElenco + " planificados (" + pct + "% de avance).\n- **Aprobados APC:** " + apc + " planos.\n- Repositorio activo y sincronizado en Cloudflare R2.";
   }
 
   if (q.includes("hito") || q.includes("venc") || q.includes("cronograma")) {
@@ -310,7 +311,7 @@ function compilarInformeEjecutivo(solicitud, hitosFront) {
 
   return "# 📑 INFORME TÉCNICO EJECUTIVO (APPS SCRIPT)\n" +
          "**FECHA:** " + fechaStr + "\n" +
-         "**TOTAL PLANOS REGISTRADOS:** " + planos.length + " de 910 contractuales.\n" +
+         "**TOTAL PLANOS REGISTRADOS:** " + planos.length + " de 543 contractuales.\n" +
          "**ESTADO:** Generado automáticamente desde Google Apps Script conectado con tu planilla.";
 }
 

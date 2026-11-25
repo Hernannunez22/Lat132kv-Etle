@@ -13,15 +13,41 @@ export function registrarServiceWorkerPWA() {
     return;
   }
   swRegistrado = true;
+
+  // En modo desarrollo, desregistrar cualquier SW previo (p.ej. dev-sw.js) para evitar bucles de recarga
+  if (import.meta.env.DEV) {
+    navigator.serviceWorker
+      .getRegistrations()
+      .then(regs => {
+        for (const reg of regs) {
+          reg.unregister().catch(() => {});
+        }
+      })
+      .catch(() => {});
+    return;
+  }
+
+  // En producción, limpiar cualquier dev-sw residual si quedó en el navegador
+  navigator.serviceWorker
+    .getRegistrations()
+    .then(regs => {
+      for (const reg of regs) {
+        const scriptUrl = reg.active?.scriptURL || reg.waiting?.scriptURL || reg.installing?.scriptURL || '';
+        if (scriptUrl.includes('dev-sw.js')) {
+          reg.unregister().catch(() => {});
+        }
+      }
+    })
+    .catch(() => {});
+
   try {
     registerSW({
       immediate: true,
-      onRegisteredSW(_swUrl, r) {
-        if (r) {
-          setInterval(() => {
-            r.update().catch(() => {});
-          }, 60 * 60 * 1000);
-        }
+      onNeedReload() {
+        // No recargar automáticamente para no interrumpir cargas o formularios en curso
+      },
+      onNeedRefresh() {
+        // La actualización se aplicará de forma segura en la próxima apertura
       },
       onRegisterError(error) {
         console.warn('[PWA] Error registrando Service Worker:', error);

@@ -31,6 +31,8 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@firebase/eslint-plugin-security-rules": "^0.0.2",
+    "eslint": "^10.15.0",
     "vite-plugin-pwa": "^2.0.0"
   }
 }

@@ -10,6 +10,7 @@ import {
   procesarArchivoPliego,
   recuperarFragmentosRelevantes,
 } from './pliegoProcessor';
+import { sanitizeSafeId } from './authMiddleware';
 
 export interface PlanoComparadorIndexado {
   id: string;
@@ -82,7 +83,9 @@ export async function indexarPlanoComparadorDesdeArchivo(params: {
   onProgress?: (paginasProcesadas: number, totalPaginas: number) => void;
 }): Promise<PlanoComparadorIndexado> {
   asegurarDirPlanos();
-  const binDestino = path.join(PLANOS_DIR, `plano_${params.rol}.pdf`);
+  const safeId = sanitizeSafeId(params.id, 'planoId');
+  const rol = params.rol === 'B' ? 'B' : 'A';
+  const binDestino = path.join(PLANOS_DIR, `plano_${rol}.pdf`);
 
   // Copiar binario si es <= 45 MB para que Gemini pueda inspeccionar dibujos CAD/tablas visualmente
   let tieneBinario = false;
@@ -94,7 +97,7 @@ export async function indexarPlanoComparadorDesdeArchivo(params: {
   }
 
   const base = await procesarArchivoDesdeDisco({
-    id: `cmp_${params.rol}_${params.id}`,
+    id: `cmp_${rol}_${safeId}`,
     nombre: params.nombre,
     tipoMime: params.tipoMime,
     rutaArchivo: params.rutaArchivo,
@@ -104,7 +107,7 @@ export async function indexarPlanoComparadorDesdeArchivo(params: {
   });
 
   // No dejar el índice del plano mezclado con los pliegos del CACHE_DIR
-  const jsonEnPliegos = path.join(CACHE_DIR, `cmp_${params.rol}_${params.id}.json`);
+  const jsonEnPliegos = path.join(CACHE_DIR, `cmp_${rol}_${safeId}.json`);
   if (fs.existsSync(jsonEnPliegos)) {
     try {
       fs.unlinkSync(jsonEnPliegos);
@@ -112,7 +115,7 @@ export async function indexarPlanoComparadorDesdeArchivo(params: {
   }
 
   // Si era escaneado, procesarArchivoDesdeDisco pudo moverlo a CACHE_DIR/cmp_...pdf
-  const pdfEscaneadoEnPliegos = path.join(CACHE_DIR, `cmp_${params.rol}_${params.id}.pdf`);
+  const pdfEscaneadoEnPliegos = path.join(CACHE_DIR, `cmp_${rol}_${safeId}.pdf`);
   if (fs.existsSync(pdfEscaneadoEnPliegos)) {
     try {
       fs.renameSync(pdfEscaneadoEnPliegos, binDestino);
@@ -151,24 +154,26 @@ export async function indexarPlanoComparadorBuffer(params: {
   fechaSubida: string;
 }): Promise<PlanoComparadorIndexado> {
   asegurarDirPlanos();
-  const binDestino = path.join(PLANOS_DIR, `plano_${params.rol}.pdf`);
+  const safeId = sanitizeSafeId(params.id, 'planoId');
+  const rol = params.rol === 'B' ? 'B' : 'A';
+  const binDestino = path.join(PLANOS_DIR, `plano_${rol}.pdf`);
   fs.writeFileSync(binDestino, params.buffer);
 
   const base = await procesarArchivoPliego({
-    id: `cmp_${params.rol}_${params.id}`,
+    id: `cmp_${rol}_${safeId}`,
     nombre: params.nombre,
     tipoMime: params.tipoMime,
     buffer: params.buffer,
     fechaSubida: params.fechaSubida,
   });
 
-  const jsonEnPliegos = path.join(CACHE_DIR, `cmp_${params.rol}_${params.id}.json`);
+  const jsonEnPliegos = path.join(CACHE_DIR, `cmp_${rol}_${safeId}.json`);
   if (fs.existsSync(jsonEnPliegos)) {
     try {
       fs.unlinkSync(jsonEnPliegos);
     } catch {}
   }
-  const pdfEscaneado = path.join(CACHE_DIR, `cmp_${params.rol}_${params.id}.pdf`);
+  const pdfEscaneado = path.join(CACHE_DIR, `cmp_${rol}_${safeId}.pdf`);
   if (fs.existsSync(pdfEscaneado)) {
     try {
       fs.unlinkSync(pdfEscaneado);
@@ -377,7 +382,7 @@ export function compararPlanosLocalFallback(params: {
 
   return (
     `# Auditoría Comparativa de Planos y Pliegos\n\n` +
-    `> ℹ️ **Motor de comparación local activo.** Para inspección visual completa de planos CAD, cotas gráficas, tablas incrustadas y análisis semántico profundo con **Gemini (${'gemini-3.8-flash'})**, configura \`GEMINI_API_KEY\` en **Settings > Secrets**.\n\n` +
+    `> ℹ️ **Motor de comparación local activo.** Para inspección visual completa de planos CAD, cotas gráficas, tablas incrustadas y análisis semántico profundo con **Gemini (gemini-3.1-flash-lite)**, configura la clave API en **Settings > Secrets**.\n\n` +
     `### Resumen de Documentos Analizados\n` +
     `- **Plano A:** ${planoA.nombre} (${planoA.paginas} págs., ${planoA.caracteresTexto.toLocaleString('es-AR')} caracteres extraídos)\n` +
     (planoB ? `- **Plano B:** ${planoB.nombre} (${planoB.paginas} págs., ${planoB.caracteresTexto.toLocaleString('es-AR')} caracteres extraídos)\n` : '') +

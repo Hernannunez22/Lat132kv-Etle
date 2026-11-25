@@ -9,6 +9,7 @@ import {
   procesarArchivoPliego,
   recuperarFragmentosRelevantes,
 } from './pliegoProcessor';
+import { sanitizeSafeId } from './authMiddleware';
 
 export interface ChatAdjuntoIndexado {
   id: string;
@@ -39,7 +40,8 @@ function asegurarDirAdjuntos() {
 
 export function guardarChatAdjunto(adj: ChatAdjuntoIndexado) {
   asegurarDirAdjuntos();
-  const metaPath = path.join(ADJUNTOS_DIR, `${adj.id}.json`);
+  const safeId = sanitizeSafeId(adj.id, 'adjuntoId');
+  const metaPath = path.join(ADJUNTOS_DIR, `${safeId}.json`);
   fs.writeFileSync(metaPath, JSON.stringify(adj), 'utf-8');
 }
 
@@ -65,7 +67,8 @@ export function cargarChatAdjuntos(): ChatAdjuntoIndexado[] {
 
 export function eliminarChatAdjuntoDisco(id: string) {
   asegurarDirAdjuntos();
-  for (const name of [`${id}.json`, `${id}.pdf`]) {
+  const safeId = sanitizeSafeId(id, 'adjuntoId');
+  for (const name of [`${safeId}.json`, `${safeId}.pdf`]) {
     const p = path.join(ADJUNTOS_DIR, name);
     if (fs.existsSync(p)) {
       try {
@@ -94,7 +97,8 @@ export async function indexarChatAdjuntoDesdeArchivo(params: {
   onProgress?: (paginasProcesadas: number, totalPaginas: number) => void;
 }): Promise<ChatAdjuntoIndexado> {
   asegurarDirAdjuntos();
-  const binDestino = path.join(ADJUNTOS_DIR, `${params.id}.pdf`);
+  const safeId = sanitizeSafeId(params.id, 'adjuntoId');
+  const binDestino = path.join(ADJUNTOS_DIR, `${safeId}.pdf`);
 
   let tieneBinario = false;
   if (params.tamanioBytes <= 45 * 1024 * 1024 && fs.existsSync(params.rutaArchivo)) {
@@ -105,7 +109,7 @@ export async function indexarChatAdjuntoDesdeArchivo(params: {
   }
 
   const base = await procesarArchivoDesdeDisco({
-    id: `chatpdf_${params.id}`,
+    id: `chatpdf_${safeId}`,
     nombre: params.nombre,
     tipoMime: params.tipoMime,
     rutaArchivo: params.rutaArchivo,
@@ -115,13 +119,13 @@ export async function indexarChatAdjuntoDesdeArchivo(params: {
   });
 
   // Limpiar artefacto temporal de CACHE_DIR raíz para no mezclarlo con pliegos
-  const jsonEnPliegos = path.join(CACHE_DIR, `chatpdf_${params.id}.json`);
+  const jsonEnPliegos = path.join(CACHE_DIR, `chatpdf_${safeId}.json`);
   if (fs.existsSync(jsonEnPliegos)) {
     try {
       fs.unlinkSync(jsonEnPliegos);
     } catch {}
   }
-  const pdfEscaneadoEnPliegos = path.join(CACHE_DIR, `chatpdf_${params.id}.pdf`);
+  const pdfEscaneadoEnPliegos = path.join(CACHE_DIR, `chatpdf_${safeId}.pdf`);
   if (fs.existsSync(pdfEscaneadoEnPliegos)) {
     try {
       fs.renameSync(pdfEscaneadoEnPliegos, binDestino);
@@ -157,26 +161,27 @@ export async function indexarChatAdjuntoBuffer(params: {
   fechaSubida: string;
 }): Promise<ChatAdjuntoIndexado> {
   asegurarDirAdjuntos();
-  const binDestino = path.join(ADJUNTOS_DIR, `${params.id}.pdf`);
+  const safeId = sanitizeSafeId(params.id, 'adjuntoId');
+  const binDestino = path.join(ADJUNTOS_DIR, `${safeId}.pdf`);
   if (params.tipoMime === 'application/pdf' || params.nombre.toLowerCase().endsWith('.pdf')) {
     fs.writeFileSync(binDestino, params.buffer);
   }
 
   const base = await procesarArchivoPliego({
-    id: `chatpdf_${params.id}`,
+    id: `chatpdf_${safeId}`,
     nombre: params.nombre,
     tipoMime: params.tipoMime,
     buffer: params.buffer,
     fechaSubida: params.fechaSubida,
   });
 
-  const jsonEnPliegos = path.join(CACHE_DIR, `chatpdf_${params.id}.json`);
+  const jsonEnPliegos = path.join(CACHE_DIR, `chatpdf_${safeId}.json`);
   if (fs.existsSync(jsonEnPliegos)) {
     try {
       fs.unlinkSync(jsonEnPliegos);
     } catch {}
   }
-  const pdfEscaneadoEnPliegos = path.join(CACHE_DIR, `chatpdf_${params.id}.pdf`);
+  const pdfEscaneadoEnPliegos = path.join(CACHE_DIR, `chatpdf_${safeId}.pdf`);
   if (fs.existsSync(pdfEscaneadoEnPliegos)) {
     try {
       fs.unlinkSync(pdfEscaneadoEnPliegos);

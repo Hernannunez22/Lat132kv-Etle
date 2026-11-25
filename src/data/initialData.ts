@@ -1,6 +1,7 @@
 import { FrenteObra, Hito, Plano, Interferencia } from '../types';
 
-export const TOTAL_PLANIFICADOS_CONTRATO_GLOBAL = 910;
+// Total oficial de planos del Elenco Consolidado (Google Sheet: Seguimiento de Elencos)
+export const TOTAL_PLANIFICADOS_CONTRATO_GLOBAL = 543;
 
 export function matchPlanoFrente(proyecto: string, frenteId: string): boolean {
   if (!frenteId || frenteId === 'TODOS') return true;
@@ -19,7 +20,7 @@ export const FRENTES_OBRA: FrenteObra[] = [
     tension: '132 kV',
     tipo: 'Línea de Alta Tensión',
     icono: '⚡',
-    totalPlanificados: 173
+    totalPlanificados: 159
   },
   {
     id: 'Leales',
@@ -27,7 +28,7 @@ export const FRENTES_OBRA: FrenteObra[] = [
     tension: '132 / 33 / 13.2 kV',
     tipo: 'Estación Transformadora',
     icono: '🏢',
-    totalPlanificados: 529
+    totalPlanificados: 170
   },
   {
     id: 'Villa Quinteros',
@@ -35,7 +36,7 @@ export const FRENTES_OBRA: FrenteObra[] = [
     tension: '132 / 33 / 13.2 kV',
     tipo: 'Ampliación y Adecuación ET',
     icono: '🔌',
-    totalPlanificados: 282
+    totalPlanificados: 114
   },
   {
     id: 'Bracho',
@@ -43,7 +44,7 @@ export const FRENTES_OBRA: FrenteObra[] = [
     tension: '132 kV',
     tipo: 'Salida de Campo & Conexión',
     icono: '🏭',
-    totalPlanificados: 99
+    totalPlanificados: 100
   }
 ];
 
@@ -240,50 +241,5 @@ export const PLANOS_INICIALES_FIJOS: Plano[] = [
   { codigo: "ET-BR-TCYP-PL-101", descripcion: "Adecuación de Paneles de Protección y Acople Óptico de Teleprotección ET El Bracho", disciplina: "Protecciones", revision: "A", proyecto: "ET El Bracho", estado: "En Revisión", selloApc: false, fecha: "2026-02-05" }
 ];
 
-export const INTERFERENCIAS_INICIALES: Interferencia[] = [
-  {
-    id: "INT-1",
-    empresa: "Transportadora de Gas del Norte (TGN)",
-    tipoInterferencia: "Cruce con Gasoducto Troncal Norte Ø 24\"",
-    normativa: "NAG-100 / ENARGAS",
-    estadoTramite: "LISTO PARA PRESENTAR",
-    vanosAfectados: "Piquetes 42 a 43 (Vano 42)",
-    faltantes: []
-  },
-  {
-    id: "INT-2",
-    empresa: "Dirección Nacional de Vialidad (DNV)",
-    tipoInterferencia: "Cruce con Autovía Ruta Nacional N° 38",
-    normativa: "Res. DNV 2038/98 Gálibos Mínimos",
-    estadoTramite: "LISTO PARA PRESENTAR",
-    vanosAfectados: "Piquetes 78 a 79 (Km 742)",
-    faltantes: []
-  },
-  {
-    id: "INT-3",
-    empresa: "Gasnor S.A.",
-    tipoInterferencia: "Paralelismo con Ramal de Distribución de Gas Natural",
-    normativa: "NAG-108 Protección Catódica",
-    estadoTramite: "DOCUMENTACIÓN INCOMPLETA",
-    vanosAfectados: "Piquetes 12 a 19 (Tramo Leales)",
-    faltantes: ["Medición de resistividad de suelo para ánodos galvánicos", "Memoria de interferencia inductiva en régimen permanente"]
-  },
-  {
-    id: "INT-4",
-    empresa: "Trenes Argentinos Cargas / SOFSE",
-    tipoInterferencia: "Cruce con Vía Férrea Ramal CC Ferrocarril Belgrano",
-    normativa: "Norma Ferrocarriles Argentinos NEFA",
-    estadoTramite: "LISTO PARA PRESENTAR",
-    vanosAfectados: "Piquetes 104 a 105",
-    faltantes: []
-  },
-  {
-    id: "INT-5",
-    empresa: "EDET S.A. (Distribuidora Eléctrica Tucumán)",
-    tipoInterferencia: "Cruce bajo Líneas de Media Tensión 33 kV y 13.2 kV",
-    normativa: "AEA 95301 / Pliego Técnico EDET",
-    estadoTramite: "DOCUMENTACIÓN INCOMPLETA",
-    vanosAfectados: "Piquetes 28, 51 y 87",
-    faltantes: ["Cronograma de cortes programados para tendido", "Acuerdo de reemplazo provisorio de postación de madera por hormigón"]
-  }
-];
+// Sin datos inventados: los cruces reales se sincronizan desde las subcarpetas de "interferencias" en Google Drive.
+export const INTERFERENCIAS_INICIALES: Interferencia[] = [];

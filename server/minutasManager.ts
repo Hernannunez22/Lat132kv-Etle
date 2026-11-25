@@ -4,6 +4,7 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import mammoth from 'mammoth';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { CACHE_DIR, asegurarDirectorioCache, PliegoIndexado, recuperarFragmentosRelevantes } from './pliegoProcessor';
+import { generarContenidoConFallback } from './geminiClient';
 import {
   MinutaReunion,
   CompromisoMinuta,
@@ -228,7 +229,8 @@ export async function analizarYExtraerCompromisosMinuta(params: {
 
   if (ai && minuta.contenidoTexto.trim().length > 20) {
     try {
-      const response = await ai.models.generateContent({
+      const { response, modelUsed } = await generarContenidoConFallback({
+        ai,
         model,
         contents:
           `Analiza la siguiente MINUTA DE REUNIÓN de la obra 132 kV (LAT El Bracho - Villa Quinteros, ET Leales, ET El Bracho, ET Villa Quinteros).\n` +
@@ -275,6 +277,7 @@ export async function analizarYExtraerCompromisosMinuta(params: {
             },
           },
         },
+        timeoutMs: 25000,
       });
 
       const parsed = JSON.parse((response.text || '{}').trim());
@@ -312,7 +315,7 @@ export async function analizarYExtraerCompromisosMinuta(params: {
           return {
             resumen: String(parsed.resumen || `Minuta ${minuta.codigo} analizada.`).trim(),
             compromisos: extraidos,
-            fuente: 'gemini',
+            fuente: modelUsed,
           };
         }
       }
@@ -444,7 +447,8 @@ export async function generarContenidoNotaPedido(params: {
         `5. **IV. REQUERIMIENTO PERENTORIO E INTIMACIÓN A INGENIERÍA**: acciones exigidas dentro del plazo de ${plazoDescargoDias} días y reserva de derechos/aplicación de penalidades contractuales.\n` +
         `6. **V. CIERRE Y CONSTANCIA DE NOTIFICACIÓN**.`;
 
-      const resp = await ai.models.generateContent({
+      const { response: resp, modelUsed } = await generarContenidoConFallback({
+        ai,
         model,
         contents: prompt,
         config: {
@@ -452,11 +456,12 @@ export async function generarContenidoNotaPedido(params: {
           systemInstruction:
             'Eres el Director Técnico / Inspector de Obra en proyectos de Alta Tensión 132 kV en Argentina. Redacta notas de pedido formales en tono técnico-contractual firme, claro y verificable. Jamás inventes números de artículos de pliego si no figuran en los extractos.',
         },
+        timeoutMs: 25000,
       });
 
       const txt = (resp.text || '').trim();
       if (txt) {
-        return { markdown: txt, fuente: 'gemini' };
+        return { markdown: txt, fuente: modelUsed };
       }
     } catch (err) {
       console.warn('[Minutas] Fallo redactando Nota de Pedido con Gemini, usando plantilla formal:', err);

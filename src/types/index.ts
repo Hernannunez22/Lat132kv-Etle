@@ -33,6 +33,16 @@ export interface Interferencia {
   estadoTramite: string;
   vanosAfectados?: string;
   faltantes?: string[];
+  carpetaNombre?: string;
+  carpetaDriveId?: string;
+  archivoSolicitudNombre?: string;
+  archivoSolicitudId?: string;
+  archivoSolicitudUrl?: string;
+  fechaDocumento?: string;
+  resumenSolicitud?: string;
+  origen?: 'drive' | 'manual';
+  archivosCarpetaCount?: number;
+  documentosLeidos?: string[];
 }
 
 export interface FrenteObra {
@@ -57,6 +67,7 @@ export interface FotoCampo {
   nombre: string;
   fecha: string;
   dataUrl: string;
+  analisisIA?: string;
 }
 
 export interface ChatAdjuntoPdf {
@@ -74,12 +85,79 @@ export interface ChatAdjuntoPdf {
   contenidoTexto?: string;
 }
 
+export type PrecisionNivelId = 'gratuito' | 'economico' | 'balanceado' | 'alta';
+export type GeminiModeloId =
+  | 'openrouter/free'
+  | 'gemini-3.1-flash-lite'
+  | 'gemini-4-hydrogen'
+  | 'gemini-4-neon';
+export type ProveedorIAModelo = 'gemini' | 'openrouter';
+export type PoliticaLimiteModelo = 'bloquear' | 'fallback_economico';
+
+export interface GeminiPrecisionMeta {
+  nivelId: PrecisionNivelId;
+  etiquetaNivel: string;
+  proveedor?: ProveedorIAModelo;
+  modeloUsado: string;
+  thinkingLevel: string;
+  inputTokens: number;
+  outputTokens: number;
+  costoUsd: number;
+  fallbackDesdeModelo?: string;
+}
+
+export interface GeminiModelUsageStat {
+  fecha: string;
+  consultas: number;
+  inputTokens: number;
+  outputTokens: number;
+  costoUsd: number;
+}
+
+export interface GeminiModelCatalogItem {
+  nivelId: PrecisionNivelId;
+  etiquetaNivel: string;
+  descripcion: string;
+  proveedor: ProveedorIAModelo;
+  modelo: GeminiModeloId;
+  thinkingLevel: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH';
+  costoInputPor1M: number;
+  costoOutputPor1M: number;
+  requiereCreditosPago: boolean;
+  configuradoEnServidor: boolean;
+  maxConsultasDiarias: number;
+  maxCostoUsdDiario: number;
+  usoHoy: GeminiModelUsageStat;
+  historicoConsultas: number;
+  historicoCostoUsd: number;
+  limiteConsultasAlcanzado: boolean;
+  limiteCostoAlcanzado: boolean;
+  disponiblePorLimite: boolean;
+}
+
+export interface GeminiPrecisionState {
+  fechaActual: string;
+  nivelPreferido: PrecisionNivelId;
+  modeloPreferido: string;
+  politicaLimite: PoliticaLimiteModelo;
+  modelosPagosHabilitados: boolean;
+  esUsuarioMaestro?: boolean;
+  costoTotalHoyUsd: number;
+  consultasTotalesHoy: number;
+  costoHistoricoUsd: number;
+  openRouterConfigurado: boolean;
+  openRouterModeloPreferido: string;
+  openRouterModelosGratuitos: Array<{ id: string; nombre: string; contextLength: number }>;
+  modelos: GeminiModelCatalogItem[];
+}
+
 export interface MensajeChat {
   id: string;
   texto: string;
   esUsuario: boolean;
   fecha?: string;
   adjuntosNombres?: string[];
+  precisionMeta?: GeminiPrecisionMeta;
 }
 
 export interface AppConfig {
@@ -172,6 +250,66 @@ export interface NotaPedidoIngenieria {
   fuenteGeneracion: string;
 }
 
+export type ActorNotaLibro =
+  | 'UTE / Contratista'
+  | 'TRANSNOA'
+  | 'Inspección'
+  | 'Comitente'
+  | 'Proyectista'
+  | 'Organismo Externo'
+  | 'Otro';
+
+export type TipoNotaLibro =
+  | 'Nota de Pedido'
+  | 'Nota de Servicio'
+  | 'Orden de Servicio'
+  | 'Comunicación'
+  | 'Contestación'
+  | 'Otro';
+
+export type SentidoNotaLibro =
+  | 'pregunta_solicitud'
+  | 'respuesta_devolucion'
+  | 'intimacion_observacion'
+  | 'informativa';
+
+export type EstadoRespuestaNota =
+  | 'CONTESTADA'
+  | 'PARCIALMENTE_CONTESTADA'
+  | 'SIN_RESPUESTA'
+  | 'CON_DISCREPANCIA'
+  | 'INFORMATIVA';
+
+export interface NotaLibro {
+  id: string;
+  codigo: string;
+  tipoNota: TipoNotaLibro;
+  titulo: string;
+  fecha: string; // YYYY-MM-DD
+  actorEmisor: ActorNotaLibro;
+  emisorDetalle: string;
+  actorReceptor: ActorNotaLibro;
+  receptorDetalle: string;
+  sentido: SentidoNotaLibro;
+  frente: string;
+  referenciasNotas: string[];
+  respondeANotas: string[];
+  respondidaPorNotas: string[];
+  estadoRespuesta: EstadoRespuestaNota;
+  preguntasOPuntos: string[];
+  respuestasODescargos: string[];
+  resumen: string;
+  contenidoTexto: string;
+  origen: 'drive' | 'archivo' | 'texto';
+  nombreArchivo?: string;
+  driveFileId?: string;
+  driveUrl?: string;
+  driveRuta?: string;
+  driveModifiedTime?: string;
+  fechaCarga: string;
+  manualOverride?: boolean;
+}
+
 export type TabType = 
   | 'dashboard' 
   | 'planos' 
@@ -182,3 +320,27 @@ export type TabType =
   | 'interferencias' 
   | 'anotador' 
   | 'chat';
+
+export interface DriveSubcarpetaInfo {
+  id: string;
+  name: string;
+  webViewLink?: string;
+}
+
+export interface DriveConnectionState {
+  connected: boolean;
+  verificando: boolean;
+  permisoLecturaDrive: boolean;
+  accountEmail: string | null;
+  accountName: string | null;
+  remainingMinutes: number;
+  rootFolderId: string;
+  rootFolderName: string | null;
+  rootFolderAccessible: boolean;
+  subcarpetas: DriveSubcarpetaInfo[];
+  elencosAccesible: boolean;
+  sugerencia?: string;
+  error?: string | null;
+  ultimaVerificacion?: string | null;
+}
+

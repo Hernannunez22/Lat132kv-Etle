@@ -1,16 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useApp } from '../context/AppContext';
+import { AudioMinutaResultado, SubidaProgresoInfo, useApp } from '../context/AppContext';
 import { CompromisoMinuta, EstadoCompromiso, MinutaReunion, NotaPedidoIngenieria } from '../types';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { descargarMarkdownComoWord } from '../utils/exportWord';
+import { apiFetch, tryReadJsonResponse } from '../utils/apiClient';
 import {
   DEFAULT_DRIVE_ROOT_FOLDER_ID,
-  GoogleDriveAuthState,
+  esErrorPopupBloqueado,
   extraerDriveFolderId,
   getGoogleDriveAccessToken,
-  signInWithGoogleDrive,
-  signOutGoogleDrive,
-  subscribeGoogleAuthState,
 } from '../utils/googleAuth';
 import {
   ClipboardList,
@@ -34,6 +32,12 @@ import {
   FolderSync,
   ExternalLink,
   LogOut,
+  Mic,
+  Square,
+  Pause,
+  Play,
+  FileAudio,
+  Sparkles,
 } from 'lucide-react';
 
 type SubVistaMinutas = 'compromisos' | 'minutas' | 'notas_pedido';
@@ -97,6 +101,7 @@ export const MinutasTab: React.FC = () => {
     notasPedido,
     sincronizarMinutasDrive,
     subirMinutaArchivo,
+    transcribirAudioMinuta,
     registrarMinutaTexto,
     eliminarMinuta,
     agregarCompromisoMinuta,
@@ -106,6 +111,11 @@ export const MinutasTab: React.FC = () => {
     eliminarNotaPedido,
     setActiveTab,
     sendChatMessage,
+    hasDriveToken,
+    driveConnectionState,
+    conectarGoogleDriveChat,
+    desconectarGoogleDrive,
+    modelosPagosHabilitados,
   } = useApp();
 
   const hoyIso = new Date().toISOString().split('T')[0];
@@ -117,12 +127,6 @@ export const MinutasTab: React.FC = () => {
   const [seleccionados, setSeleccionados] = useState<string[]>([]);
 
   // Google Drive sync
-  const [driveAuth, setDriveAuth] = useState<GoogleDriveAuthState>({
-    isSignedIn: false,
-    hasDriveToken: false,
-    email: null,
-    displayName: null,
-  });
   const [driveFolderInput, setDriveFolderInput] = useState<string>(DEFAULT_DRIVE_ROOT_FOLDER_ID);
   const [buscarTodoDrive, setBuscarTodoDrive] = useState<boolean>(true);
   const [sincronizandoDrive, setSincronizandoDrive] = useState<boolean>(false);
@@ -135,13 +139,9 @@ export const MinutasTab: React.FC = () => {
     erroresArchivos: Array<{ nombre: string; error: string }>;
   } | null>(null);
 
-  useEffect(() => {
-    const unsub = subscribeGoogleAuthState(setDriveAuth);
-    return () => unsub();
-  }, []);
-
   // Paneles de alta
   const [mostrarAltaMinuta, setMostrarAltaMinuta] = useState(false);
+  const [mostrarAudioMinuta, setMostrarAudioMinuta] = useState(false);
   const [mostrarAltaCompromiso, setMostrarAltaCompromiso] = useState(false);
   const [subiendoArchivo, setSubiendoArchivo] = useState(false);
   const [guardandoMinuta, setGuardandoMinuta] = useState(false);
@@ -149,6 +149,45 @@ export const MinutasTab: React.FC = () => {
   const [mensajeOk, setMensajeOk] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const audioFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Estudio de Audio Largo -> Minuta (Groq Whisper + Modelo de referencia)
+  const [audioConfig, setAudioConfig] = useState<{
+    groqConfigurado: boolean;
+    groqVistaSegura: string | null;
+    openRouterConfigurado: boolean;
+    geminiConfigurado: boolean;
+  } | null>(null);
+  const [audioModeloId, setAudioModeloId] = useState<string>('');
+  const [audioMotor, setAudioMotor] = useState<'gratuito' | 'gemini'>('gratuito');
+  useEffect(() => {
+    if (!modelosPagosHabilitados && audioMotor !== 'gratuito') {
+      setAudioMotor('gratuito');
+    }
+  }, [modelosPagosHabilitados, audioMotor]);
+  const [audioCodigo, setAudioCodigo] = useState('');
+  const [audioFecha, setAudioFecha] = useState(hoyIso);
+  const [audioFrente, setAudioFrente] = useState(FRENTES_OPCIONES[0]);
+  const [audioTitulo, setAudioTitulo] = useState('');
+  const [audioParticipantes, setAudioParticipantes] = useState(
+    'UTE · Ingeniería / Proyectista · Inspección'
+  );
+  const [recEstado, setRecEstado] = useState<'inactivo' | 'grabando' | 'pausado'>('inactivo');
+  const [recSegundos, setRecSegundos] = useState(0);
+  const [recBytesAprox, setRecBytesAprox] = useState(0);
+  const [procesandoAudio, setProcesandoAudio] = useState(false);
+  const [progresoAudio, setProgresoAudio] = useState<SubidaProgresoInfo | null>(null);
+  const [resultadoAudio, setResultadoAudio] = useState<AudioMinutaResultado | null>(null);
+  const [borradorEditado, setBorradorEditado] = useState('');
+  const [verTranscripcionLiteral, setVerTranscripcionLiteral] = useState(false);
+  const [guardandoBorradorAudio, setGuardandoBorradorAudio] = useState(false);
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const wakeLockRef = useRef<any>(null);
+  const recTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cancelRecFlagRef = useRef<boolean>(false);
 
   // Form nueva minuta
   const [minCodigo, setMinCodigo] = useState('');
@@ -237,20 +276,285 @@ export const MinutasTab: React.FC = () => {
     setMensajeOk(null);
   };
 
-  const ejecutarLecturaDrive = async (tokenOverride?: string) => {
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      try {
+        const res = await apiFetch('/api/minutas/audio/config');
+        if (!res.ok || cancel) return;
+        const data = await tryReadJsonResponse(res);
+        if (data?.exito && !cancel) {
+          setAudioConfig({
+            groqConfigurado: Boolean(data.groqConfigurado),
+            groqVistaSegura: data.groqVistaSegura || null,
+            openRouterConfigurado: Boolean(data.openRouterConfigurado),
+            geminiConfigurado: Boolean(data.geminiConfigurado),
+          });
+        }
+      } catch {}
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [mostrarAudioMinuta]);
+
+  const liberarRecursosGrabacion = () => {
+    if (recTimerRef.current) {
+      clearInterval(recTimerRef.current);
+      recTimerRef.current = null;
+    }
+    if (wakeLockRef.current) {
+      try {
+        wakeLockRef.current.release();
+      } catch {}
+      wakeLockRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      for (const track of mediaStreamRef.current.getTracks()) {
+        track.stop();
+      }
+      mediaStreamRef.current = null;
+    }
+    mediaRecorderRef.current = null;
+  };
+
+  useEffect(() => {
+    return () => {
+      cancelRecFlagRef.current = true;
+      liberarRecursosGrabacion();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (recEstado === 'inactivo') return;
+    const onBeforeUnload = (ev: BeforeUnloadEvent) => {
+      ev.preventDefault();
+      ev.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [recEstado]);
+
+  const formatearCronometro = (totalSec: number) => {
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  };
+
+  const procesarBlobAudioHaciaMinuta = async (blob: Blob, nombreArchivo: string) => {
+    limpiarMensajes();
+    setProcesandoAudio(true);
+    setResultadoAudio(null);
+    setBorradorEditado('');
+    setVerTranscripcionLiteral(false);
+    setProgresoAudio({
+      fase: 'subiendo',
+      porcentaje: 2,
+      detalle: `Preparando "${nombreArchivo}" (${(blob.size / (1024 * 1024)).toFixed(1)} MB)...`,
+    });
+
+    try {
+      const res = await transcribirAudioMinuta(
+        blob,
+        {
+          nombreArchivo,
+          modeloMinutaId: audioModeloId,
+          codigo: audioCodigo.trim() || undefined,
+          titulo: audioTitulo.trim() || undefined,
+          fechaReunion: audioFecha || hoyIso,
+          frente: audioFrente || undefined,
+          participantes: audioParticipantes.trim() || undefined,
+          motor: audioMotor,
+        },
+        info => setProgresoAudio(info)
+      );
+      setResultadoAudio(res);
+      setBorradorEditado(res.borradorMarkdown);
+      setMensajeOk(
+        `Audio transcrito en ${res.segmentosProcesados} tramo(s) y borrador de minuta redactado. Revisa y guarda los compromisos.`
+      );
+    } catch (err: any) {
+      setErrorAccion(err?.message || 'Error transcribiendo el audio de reunión.');
+    } finally {
+      setProcesandoAudio(false);
+      setProgresoAudio(null);
+    }
+  };
+
+  const handleIniciarGrabacionReunion = async () => {
+    limpiarMensajes();
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      setErrorAccion('Tu navegador no admite grabación de micrófono directa. Usa "Subir Audio".');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+
+      const mimeCandidates = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+      ];
+      const selectedMime =
+        typeof MediaRecorder !== 'undefined' && typeof MediaRecorder.isTypeSupported === 'function'
+          ? mimeCandidates.find(m => MediaRecorder.isTypeSupported(m))
+          : undefined;
+
+      const recorder = new MediaRecorder(stream, {
+        ...(selectedMime ? { mimeType: selectedMime } : {}),
+        audioBitsPerSecond: 32000,
+      });
+
+      audioChunksRef.current = [];
+      cancelRecFlagRef.current = false;
+      setRecSegundos(0);
+      setRecBytesAprox(0);
+
+      recorder.ondataavailable = ev => {
+        if (ev.data && ev.data.size > 0) {
+          audioChunksRef.current.push(ev.data);
+          setRecBytesAprox(prev => prev + ev.data.size);
+        }
+      };
+
+      recorder.onstop = () => {
+        const mimeFinal = recorder.mimeType || selectedMime || 'audio/webm';
+        const chunks = [...audioChunksRef.current];
+        const fueCancelado = cancelRecFlagRef.current;
+        liberarRecursosGrabacion();
+        setRecEstado('inactivo');
+
+        if (fueCancelado || chunks.length === 0) {
+          return;
+        }
+        const ext = mimeFinal.includes('mp4') ? 'm4a' : mimeFinal.includes('ogg') ? 'ogg' : 'webm';
+        const blobFinal = new Blob(chunks, { type: mimeFinal });
+        void procesarBlobAudioHaciaMinuta(
+          blobFinal,
+          `reunion_${audioFecha || hoyIso}_${Date.now()}.${ext}`
+        );
+      };
+
+      mediaRecorderRef.current = recorder;
+      recorder.start(2000);
+      setRecEstado('grabando');
+
+      recTimerRef.current = setInterval(() => {
+        setRecSegundos(prev => prev + 1);
+      }, 1000);
+
+      if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
+        try {
+          wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+        } catch {}
+      }
+    } catch (err: any) {
+      liberarRecursosGrabacion();
+      setRecEstado('inactivo');
+      setErrorAccion(
+        err?.message || 'No se pudo acceder al micrófono. Verifica los permisos del navegador.'
+      );
+    }
+  };
+
+  const handlePausarReanudarGrabacion = () => {
+    const rec = mediaRecorderRef.current;
+    if (!rec) return;
+    if (recEstado === 'grabando' && rec.state === 'recording') {
+      rec.pause();
+      if (recTimerRef.current) {
+        clearInterval(recTimerRef.current);
+        recTimerRef.current = null;
+      }
+      setRecEstado('pausado');
+    } else if (recEstado === 'pausado' && rec.state === 'paused') {
+      rec.resume();
+      recTimerRef.current = setInterval(() => {
+        setRecSegundos(prev => prev + 1);
+      }, 1000);
+      setRecEstado('grabando');
+    }
+  };
+
+  const handleFinalizarGrabacion = () => {
+    const rec = mediaRecorderRef.current;
+    if (!rec) return;
+    cancelRecFlagRef.current = false;
+    if (rec.state !== 'inactive') {
+      rec.stop();
+    }
+  };
+
+  const handleDescartarGrabacion = () => {
+    const rec = mediaRecorderRef.current;
+    cancelRecFlagRef.current = true;
+    audioChunksRef.current = [];
+    setRecSegundos(0);
+    setRecBytesAprox(0);
+    if (rec && rec.state !== 'inactive') {
+      rec.stop();
+    } else {
+      liberarRecursosGrabacion();
+      setRecEstado('inactivo');
+    }
+  };
+
+  const handleSubirArchivoAudio = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    await procesarBlobAudioHaciaMinuta(file, file.name);
+  };
+
+  const handleGuardarBorradorAudioComoMinuta = async () => {
+    if (!borradorEditado.trim()) {
+      setErrorAccion('El borrador de la minuta está vacío.');
+      return;
+    }
+    limpiarMensajes();
+    setGuardandoBorradorAudio(true);
+    try {
+      const res = await registrarMinutaTexto({
+        codigo: audioCodigo.trim() || undefined,
+        titulo: audioTitulo.trim() || undefined,
+        fechaReunion: audioFecha || hoyIso,
+        frente: audioFrente,
+        participantes: audioParticipantes.trim() || undefined,
+        contenidoTexto: borradorEditado.trim(),
+        extraerAutomaticamente: true,
+      });
+      setMensajeOk(
+        `Minuta ${res.minuta.codigo} guardada desde audio con ${res.compromisosExtraidos.length} compromiso(s) extraído(s).`
+      );
+      setResultadoAudio(null);
+      setBorradorEditado('');
+      setAudioCodigo('');
+      setAudioTitulo('');
+      setMostrarAudioMinuta(false);
+      setSubVista('compromisos');
+    } catch (err: any) {
+      setErrorAccion(err?.message || 'Error guardando la minuta generada.');
+    } finally {
+      setGuardandoBorradorAudio(false);
+    }
+  };
+
+  const ejecutarLecturaDrive = async (tokenOverride?: string, forceConsent = false) => {
     limpiarMensajes();
     setSincronizandoDrive(true);
     try {
-      let token = tokenOverride || getGoogleDriveAccessToken();
+      let token = tokenOverride || (forceConsent ? null : getGoogleDriveAccessToken());
       if (!token) {
-        const authRes = await signInWithGoogleDrive();
-        token = authRes.accessToken;
-        setDriveAuth({
-          isSignedIn: true,
-          hasDriveToken: true,
-          email: authRes.user.email || null,
-          displayName: authRes.user.displayName || null,
-        });
+        await conectarGoogleDriveChat({ forceConsent });
+        token = getGoogleDriveAccessToken();
+        if (!token) {
+          throw new Error(
+            'No se recibió el permiso de lectura de Google Drive. Vuelve a iniciar sesión y acepta el acceso a Google Drive.'
+          );
+        }
       }
 
       const folderId = extraerDriveFolderId(driveFolderInput);
@@ -290,13 +594,7 @@ export const MinutasTab: React.FC = () => {
   };
 
   const handleDesconectarDrive = async () => {
-    await signOutGoogleDrive();
-    setDriveAuth({
-      isSignedIn: false,
-      hasDriveToken: false,
-      email: null,
-      displayName: null,
-    });
+    await desconectarGoogleDrive();
   };
 
   const handleArchivoMinuta = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -470,17 +768,17 @@ export const MinutasTab: React.FC = () => {
   return (
     <div className="space-y-4">
       {/* Cabecera de módulo y navegación segmentada */}
-      <div className="bento-card p-5 space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400 shrink-0">
-              <ClipboardList className="w-5 h-5" />
+      <div className="bento-card p-3 sm:p-5 space-y-3 sm:space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 sm:gap-4">
+          <div className="flex items-start gap-2.5 sm:gap-3 min-w-0">
+            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400 shrink-0">
+              <ClipboardList className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
-            <div>
-              <h2 className="text-sm font-bold text-white tracking-tight">
+            <div className="min-w-0">
+              <h2 className="text-xs sm:text-sm font-bold text-white tracking-tight">
                 Minutas, Compromisos y Notas de Pedido a Ingeniería
               </h2>
-              <p className="text-xs text-slate-400 mt-0.5">
+              <p className="text-[11px] sm:text-xs text-slate-400 mt-0.5">
                 Accede a actas de reunión, controla fechas límite de compromisos y emite Notas de Pedido formales ante incumplimientos.
               </p>
             </div>
@@ -506,7 +804,7 @@ export const MinutasTab: React.FC = () => {
                     <path fill="#FBBC05" d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14z" />
                     <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96z" />
                   </svg>
-                  <span>{driveAuth.hasDriveToken ? 'Sincronizar Minutas de Drive' : 'Conectar y Leer Drive'}</span>
+                  <span>{hasDriveToken ? 'Sincronizar Minutas de Drive' : 'Conectar y Leer Drive'}</span>
                 </>
               )}
             </button>
@@ -525,7 +823,30 @@ export const MinutasTab: React.FC = () => {
             <button
               type="button"
               onClick={() => {
+                setMostrarAudioMinuta(prev => !prev);
+                setMostrarAltaMinuta(false);
+                setMostrarAltaCompromiso(false);
+                limpiarMensajes();
+              }}
+              className={`px-3.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                mostrarAudioMinuta || recEstado !== 'inactivo'
+                  ? 'bg-sky-600 border-sky-500 text-white'
+                  : 'bg-sky-600/15 hover:bg-sky-600/25 border-sky-500/40 text-sky-300'
+              }`}
+              title="Grabar reunión o subir audio largo con Groq Whisper"
+            >
+              <Mic className="w-3.5 h-3.5" />
+              <span>
+                {recEstado !== 'inactivo'
+                  ? `REC ${formatearCronometro(recSegundos)}`
+                  : 'Grabar / Audio'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
                 setMostrarAltaMinuta(prev => !prev);
+                setMostrarAudioMinuta(false);
                 setMostrarAltaCompromiso(false);
                 limpiarMensajes();
               }}
@@ -559,7 +880,7 @@ export const MinutasTab: React.FC = () => {
 
         {/* Barra de origen Google Drive */}
         <div className="pt-3 border-t border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs">
-          <div className="flex flex-1 flex-wrap items-center gap-2">
+          <div className="flex flex-1 flex-wrap items-center gap-2 min-w-0">
             <label className="text-[11px] font-semibold text-slate-400 whitespace-nowrap">
               Carpeta / Link Google Drive:
             </label>
@@ -568,7 +889,7 @@ export const MinutasTab: React.FC = () => {
               value={driveFolderInput}
               onChange={e => setDriveFolderInput(e.target.value)}
               placeholder={DEFAULT_DRIVE_ROOT_FOLDER_ID}
-              className="flex-1 min-w-[220px] max-w-md bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-sky-500"
+              className="w-full sm:w-auto sm:flex-1 sm:min-w-[220px] sm:max-w-md bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-sky-500"
             />
             <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer">
               <input
@@ -582,10 +903,24 @@ export const MinutasTab: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400 shrink-0">
-            {driveAuth.email && (
-              <span className="text-slate-300 font-mono">{driveAuth.email}</span>
+            {driveConnectionState.accountEmail && (
+              <span className="text-emerald-300 font-mono">
+                {driveConnectionState.accountEmail}
+                {driveConnectionState.remainingMinutes > 0 ? ` (${driveConnectionState.remainingMinutes}m)` : ''}
+              </span>
             )}
-            {driveAuth.isSignedIn && (
+            {hasDriveToken && (
+              <button
+                type="button"
+                onClick={() => void ejecutarLecturaDrive(undefined, true)}
+                disabled={sincronizandoDrive}
+                className="text-sky-300 hover:text-sky-200 underline cursor-pointer"
+                title="Cambiar de cuenta o renovar permiso de Google Drive"
+              >
+                Reautorizar
+              </button>
+            )}
+            {hasDriveToken && (
               <button
                 type="button"
                 onClick={handleDesconectarDrive}
@@ -627,7 +962,7 @@ export const MinutasTab: React.FC = () => {
             </span>
           </div>
 
-          <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-xl self-start md:self-auto">
+          <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-xl max-w-full overflow-x-auto flex-nowrap no-scrollbar self-start md:self-auto">
             <button
               type="button"
               onClick={() => setSubVista('compromisos')}
@@ -667,9 +1002,36 @@ export const MinutasTab: React.FC = () => {
 
       {/* Alertas de operación */}
       {errorAccion && (
-        <div className="bento-card p-3.5 border-rose-500/40 bg-rose-950/30 text-xs text-rose-200 flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-          <span>{errorAccion}</span>
+        <div className="bento-card p-3.5 border-rose-500/40 bg-rose-950/30 text-xs text-rose-200 flex flex-col gap-2">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <span>{errorAccion}</span>
+          </div>
+          {(esErrorPopupBloqueado(errorAccion) ||
+            errorAccion.toLowerCase().includes('drive') ||
+            errorAccion.toLowerCase().includes('permiso') ||
+            errorAccion.toLowerCase().includes('expir')) && (
+            <div className="flex flex-wrap items-center gap-2">
+              {esErrorPopupBloqueado(errorAccion) && (
+                <a
+                  href={typeof window !== 'undefined' ? window.location.href : '#'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span>Abrir en pestaña nueva y reintentar</span>
+                </a>
+              )}
+              <button
+                type="button"
+                onClick={() => void ejecutarLecturaDrive(undefined, true)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-[11px] font-semibold cursor-pointer"
+              >
+                <span>Reautorizar Google Drive</span>
+              </button>
+            </div>
+          )}
         </div>
       )}
       {mensajeOk && (
@@ -679,9 +1041,386 @@ export const MinutasTab: React.FC = () => {
         </div>
       )}
 
+      {/* Estudio desplegable: Grabar Reunión o Subir Audio Largo -> Transcribir con Groq + Armar Minuta Modelo */}
+      {mostrarAudioMinuta && (
+        <div className="bento-card p-3.5 sm:p-5 space-y-4 border-sky-500/40">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+                  <Mic className="w-4 h-4 text-sky-400" />
+                  <span>Grabar Reunión o Subir Audio (Groq Whisper + Minuta Automática)</span>
+                </h3>
+                {audioConfig && (
+                  <span
+                    className={`text-[11px] font-mono px-2 py-0.5 rounded border ${
+                      audioConfig.groqConfigurado
+                        ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
+                        : 'bg-amber-950/40 border-amber-500/40 text-amber-300'
+                    }`}
+                  >
+                    {audioConfig.groqConfigurado
+                      ? `Groq Whisper Listo (${audioConfig.groqVistaSegura || 'activo'})`
+                      : 'Falta GROQ_API_KEY en Secrets'}
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Soporta grabaciones en vivo y archivos de hasta 2+ horas (.mp3, .m4a, .wav, .webm, .ogg, .mp4). El servidor divide el audio en tramos de 15 min (&lt;25 MB) para transcribirlo gratis con Groq Whisper y redactar la minuta siguiendo el modelo elegido.
+              </p>
+            </div>
+          </div>
+
+          {/* Configuración de modelo y metadatos */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Minuta modelo (estructura a imitar)
+              </label>
+              <select
+                value={audioModeloId}
+                onChange={e => setAudioModeloId(e.target.value)}
+                disabled={procesandoAudio}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+              >
+                <option value="">
+                  {minutas.length > 0
+                    ? `Automático: ${minutas[0].codigo} (${minutas[0].titulo.slice(0, 32)})`
+                    : 'Plantilla estándar de Obra 132 kV'}
+                </option>
+                {minutas.map(m => (
+                  <option key={m.id} value={m.id}>
+                    {m.codigo} · {m.titulo.slice(0, 48)}
+                  </option>
+                ))}
+                <option value="__NINGUNO__">Plantilla estándar de Obra 132 kV</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Motor de redacción de minuta
+              </label>
+              <select
+                value={modelosPagosHabilitados ? audioMotor : 'gratuito'}
+                onChange={e =>
+                  setAudioMotor(modelosPagosHabilitados && e.target.value === 'gemini' ? 'gemini' : 'gratuito')
+                }
+                disabled={procesandoAudio || !modelosPagosHabilitados}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-80"
+              >
+                <option value="gratuito">
+                  Gratuito $0 · Groq Whisper + OpenRouter (:free)
+                </option>
+                {modelosPagosHabilitados && (
+                  <option value="gemini">Groq Whisper + Gemini</option>
+                )}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Frente de Obra
+              </label>
+              <select
+                value={audioFrente}
+                onChange={e => setAudioFrente(e.target.value)}
+                disabled={procesandoAudio}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+              >
+                {FRENTES_OPCIONES.map(f => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Código Minuta (opcional)
+              </label>
+              <input
+                type="text"
+                value={audioCodigo}
+                onChange={e => setAudioCodigo(e.target.value)}
+                placeholder="Ej: MIN-ING-025"
+                disabled={procesandoAudio}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-sky-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Fecha de Reunión
+              </label>
+              <input
+                type="date"
+                value={audioFecha}
+                onChange={e => setAudioFecha(e.target.value)}
+                disabled={procesandoAudio}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-sky-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                Tema / Título (opcional)
+              </label>
+              <input
+                type="text"
+                value={audioTitulo}
+                onChange={e => setAudioTitulo(e.target.value)}
+                placeholder="Ej: Reunión Semanal Ingeniería 132 kV"
+                disabled={procesandoAudio}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+              Participantes / Áreas presentes
+            </label>
+            <input
+              type="text"
+              value={audioParticipantes}
+              onChange={e => setAudioParticipantes(e.target.value)}
+              disabled={procesandoAudio}
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+            />
+          </div>
+
+          {/* Controles de Grabación en Vivo y Subida de Archivo */}
+          <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
+              {recEstado === 'inactivo' ? (
+                <button
+                  type="button"
+                  onClick={handleIniciarGrabacionReunion}
+                  disabled={procesandoAudio}
+                  className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-2 transition-colors cursor-pointer"
+                >
+                  <Mic className="w-4 h-4" />
+                  <span>Grabar Reunión en Vivo</span>
+                </button>
+              ) : (
+                <>
+                  <div className="px-3 py-2 rounded-xl bg-rose-950/50 border border-rose-500/40 flex items-center gap-2 font-mono text-xs text-rose-200">
+                    <span
+                      className={`w-2.5 h-2.5 rounded-full ${
+                        recEstado === 'grabando' ? 'bg-rose-500 animate-pulse' : 'bg-amber-400'
+                      }`}
+                    />
+                    <span className="font-bold">{formatearCronometro(recSegundos)}</span>
+                    <span className="text-[11px] text-slate-400">
+                      ({(recBytesAprox / (1024 * 1024)).toFixed(1)} MB)
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handlePausarReanudarGrabacion}
+                    className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {recEstado === 'grabando' ? (
+                      <>
+                        <Pause className="w-3.5 h-3.5" />
+                        <span>Pausar</span>
+                      </>
+                    ) : (
+                      <>
+                        <Play className="w-3.5 h-3.5" />
+                        <span>Reanudar</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleFinalizarGrabacion}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Square className="w-3.5 h-3.5 fill-current" />
+                    <span>Finalizar y Armar Minuta</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDescartarGrabacion}
+                    className="px-3 py-2 rounded-xl bg-slate-900 hover:bg-rose-950/40 border border-slate-800 text-slate-400 hover:text-rose-300 text-xs cursor-pointer"
+                  >
+                    Descartar
+                  </button>
+                </>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                ref={audioFileInputRef}
+                type="file"
+                accept=".mp3,.m4a,.wav,.webm,.ogg,.mp4,.aac,.flac,audio/*"
+                onChange={handleSubirArchivoAudio}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => audioFileInputRef.current?.click()}
+                disabled={procesandoAudio || recEstado !== 'inactivo'}
+                className="px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <FileAudio className="w-4 h-4" />
+                <span>Subir Audio (.mp3, .m4a, .wav, .webm)</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Barra de progreso de subida / segmentación / transcripción */}
+          {procesandoAudio && progresoAudio && (
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-sky-500/30 space-y-2">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="text-sky-300 font-semibold flex items-center gap-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>{progresoAudio.detalle}</span>
+                </span>
+                <span className="font-mono text-slate-300 tabular-nums">
+                  {progresoAudio.porcentaje}%
+                </span>
+              </div>
+              <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                <div
+                  className="h-full bg-sky-500 transition-all duration-300"
+                  style={{ width: `${Math.min(100, Math.max(4, progresoAudio.porcentaje))}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Revisión y Guardado de la Minuta generada */}
+          {resultadoAudio && !procesandoAudio && (
+            <div className="space-y-3 pt-3 border-t border-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <div className="flex flex-wrap items-center gap-2 text-slate-300 font-mono">
+                  <span className="text-emerald-400 font-bold inline-flex items-center gap-1">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Borrador generado
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span>{resultadoAudio.segmentosProcesados} tramo(s)</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{resultadoAudio.modeloTranscripcion}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{resultadoAudio.fuenteRedaccion}</span>
+                  {resultadoAudio.modeloReferenciaUsado && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="text-sky-300">
+                        Modelo: {resultadoAudio.modeloReferenciaUsado}
+                      </span>
+                    </>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      descargarMarkdownComoWord(
+                        (audioCodigo || 'Minuta_Audio').replace(/[^a-zA-Z0-9_-]/g, '_'),
+                        audioTitulo || 'Minuta de Reunión 132 kV',
+                        borradorEditado
+                      )
+                    }
+                    className="px-2.5 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    <span>Word (.doc)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      imprimirMarkdownComoPdf(audioCodigo || 'Minuta de Reunión', borradorEditado)
+                    }
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sky-300 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    <span>Imprimir / PDF</span>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                  Borrador editable de la Minuta (puedes ajustarlo antes de guardar)
+                </label>
+                <textarea
+                  rows={12}
+                  value={borradorEditado}
+                  onChange={e => setBorradorEditado(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-slate-100 font-sans leading-relaxed focus:outline-none focus:ring-1 focus:ring-sky-500"
+                />
+              </div>
+
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setVerTranscripcionLiteral(prev => !prev)}
+                  className="text-[11px] text-sky-400 hover:text-sky-300 font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  {verTranscripcionLiteral ? (
+                    <ChevronUp className="w-3.5 h-3.5" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {verTranscripcionLiteral
+                      ? 'Ocultar transcripción literal de audio'
+                      : 'Ver transcripción literal completa (con marcas de tiempo)'}
+                  </span>
+                </button>
+                {verTranscripcionLiteral && (
+                  <pre className="mt-2 whitespace-pre-wrap text-[11px] text-slate-300 bg-slate-950 border border-slate-800 rounded-xl p-3 max-h-60 overflow-y-auto font-sans leading-relaxed">
+                    {resultadoAudio.transcripcionMarcaTiempo}
+                  </pre>
+                )}
+              </div>
+
+              <div className="flex flex-wrap justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResultadoAudio(null);
+                    setBorradorEditado('');
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 text-xs cursor-pointer"
+                >
+                  Descartar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleGuardarBorradorAudioComoMinuta}
+                  disabled={guardandoBorradorAudio || !borradorEditado.trim()}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-xs font-bold flex items-center gap-2 cursor-pointer"
+                >
+                  {guardandoBorradorAudio ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Guardando y extrayendo compromisos...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Guardar Minuta y Extraer Compromisos</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Formulario desplegable: Cargar Minuta (Archivo o Texto) */}
       {mostrarAltaMinuta && (
-        <div className="bento-card p-5 space-y-4 border-sky-500/30">
+        <div className="bento-card p-3.5 sm:p-5 space-y-4 border-sky-500/30">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-800">
             <div>
               <h3 className="text-xs font-bold text-white">
@@ -827,7 +1566,7 @@ export const MinutasTab: React.FC = () => {
 
       {/* Formulario desplegable: Nuevo Compromiso Puntual */}
       {mostrarAltaCompromiso && (
-        <form onSubmit={handleCrearCompromiso} className="bento-card p-5 space-y-3 border-slate-700 text-xs">
+        <form onSubmit={handleCrearCompromiso} className="bento-card p-3.5 sm:p-5 space-y-3 border-slate-700 text-xs">
           <div className="pb-2 border-b border-slate-800">
             <h3 className="text-xs font-bold text-white">Registrar Compromiso de Minuta</h3>
           </div>
@@ -963,7 +1702,7 @@ export const MinutasTab: React.FC = () => {
             <select
               value={filtroFrente}
               onChange={e => setFiltroFrente(e.target.value)}
-              className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none"
+              className="w-full sm:w-auto bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none"
             >
               <option value="TODOS">Todos los frentes</option>
               {FRENTES_OPCIONES.map(f => (
@@ -972,7 +1711,7 @@ export const MinutasTab: React.FC = () => {
             </select>
 
             {subVista === 'compromisos' && (
-              <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-xl">
+              <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-xl max-w-full overflow-x-auto flex-nowrap no-scrollbar">
                 {(['TODOS', 'INCUMPLIDO', 'PENDIENTE', 'CUMPLIDO'] as FiltroEstado[]).map(f => (
                   <button
                     key={f}
@@ -1069,7 +1808,127 @@ export const MinutasTab: React.FC = () => {
             </div>
           ) : (
             <div className="bento-card overflow-hidden">
-              <div className="overflow-x-auto">
+              {/* Vista apilada en móvil (<768px) */}
+              <div className="md:hidden divide-y divide-slate-800/80">
+                {compromisosFiltrados.map(comp => {
+                  const esInc = esIncumplidoOVencido(comp, hoyIso);
+                  const diasDesvio = calcularDiasDesvio(comp.fechaLimite, hoyIso);
+                  const isSel = seleccionados.includes(comp.id);
+
+                  return (
+                    <div
+                      key={comp.id}
+                      className={`p-3 space-y-2.5 text-xs ${isSel ? 'bg-sky-950/20' : ''}`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-start gap-2 min-w-0">
+                          <input
+                            type="checkbox"
+                            checked={isSel}
+                            onChange={() => toggleSeleccion(comp.id)}
+                            className="mt-0.5 rounded border-slate-600 bg-slate-950 text-sky-500 cursor-pointer shrink-0"
+                            aria-label={`Seleccionar compromiso ${comp.numeroItem}`}
+                          />
+                          <div className="min-w-0">
+                            <div className="font-mono font-bold text-sky-400 truncate">{comp.minutaCodigo}</div>
+                            <div className="text-[11px] text-slate-500 font-mono tabular-nums">
+                              {comp.numeroItem} · {comp.minutaFecha}
+                            </div>
+                          </div>
+                        </div>
+
+                        {comp.estado === 'CUMPLIDO' ? (
+                          <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold shrink-0 text-[11px]">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>Cumplido</span>
+                          </span>
+                        ) : esInc ? (
+                          <span className="inline-flex items-center gap-1 text-rose-400 font-semibold shrink-0 text-[11px]">
+                            <AlertTriangle className="w-3.5 h-3.5" />
+                            <span>Incumplido</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-amber-300 font-semibold shrink-0 text-[11px]">
+                            <Clock className="w-3.5 h-3.5" />
+                            <span>{comp.estado === 'EN_CURSO' ? 'En curso' : 'Pendiente'}</span>
+                          </span>
+                        )}
+                      </div>
+
+                      <p className="text-slate-100 leading-relaxed">{comp.descripcion}</p>
+
+                      {((comp.documentosRelacionados && comp.documentosRelacionados.length > 0) ||
+                        (comp.notasPedidoIds && comp.notasPedidoIds.length > 0)) && (
+                        <div className="text-[11px] text-slate-400 font-mono flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                          {comp.documentosRelacionados && comp.documentosRelacionados.length > 0 && (
+                            <span className="break-all">Docs: {comp.documentosRelacionados.join(', ')}</span>
+                          )}
+                          {comp.notasPedidoIds && comp.notasPedidoIds.length > 0 && (
+                            <span className="text-rose-300 font-semibold">
+                              NP emitidas: {comp.notasPedidoIds.join(', ')}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] pt-1 border-t border-slate-800/60">
+                        <div className="min-w-0">
+                          <span className="font-semibold text-slate-200">{comp.responsable}</span>
+                          <span className="text-slate-500"> · {comp.frente}</span>
+                        </div>
+                        <div className="font-mono tabular-nums shrink-0">
+                          <span className={esInc ? 'text-rose-300 font-bold' : 'text-slate-200'}>
+                            Vence: {comp.fechaLimite}
+                          </span>
+                          {comp.estado !== 'CUMPLIDO' && diasDesvio > 0 && (
+                            <span className="text-rose-400 ml-1">({diasDesvio}d mora)</span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-end gap-1.5 pt-1">
+                        {comp.estado !== 'CUMPLIDO' ? (
+                          <button
+                            type="button"
+                            onClick={() => actualizarCompromisoMinuta(comp.id, { estado: 'CUMPLIDO' })}
+                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-emerald-600/20 border border-slate-700 text-emerald-300 text-[11px] font-semibold cursor-pointer"
+                          >
+                            Cumplir
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => actualizarCompromisoMinuta(comp.id, { estado: 'INCUMPLIDO' })}
+                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-600/20 border border-slate-700 text-slate-300 text-[11px] font-semibold cursor-pointer"
+                          >
+                            Reabrir
+                          </button>
+                        )}
+                        {comp.estado !== 'CUMPLIDO' && (
+                          <button
+                            type="button"
+                            onClick={() => prepararNotaPedidoDesde([comp.id])}
+                            className="px-2.5 py-1 rounded-lg bg-rose-600/20 hover:bg-rose-600/35 border border-rose-500/40 text-rose-200 text-[11px] font-bold cursor-pointer"
+                          >
+                            Nota de Pedido
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => eliminarCompromisoMinuta(comp.id)}
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 cursor-pointer"
+                          title="Eliminar compromiso"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Tabla completa en escritorio (>=768px) */}
+              <div className="hidden md:block overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-slate-800 bg-slate-950/60 text-[11px] font-semibold text-slate-400">
@@ -1235,9 +2094,9 @@ export const MinutasTab: React.FC = () => {
               const expandida = minutaExpandidaId === m.id;
 
               return (
-                <div key={m.id} className="bento-card p-5 space-y-3">
+                <div key={m.id} className="bento-card p-3 sm:p-5 space-y-3">
                   <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
-                    <div className="space-y-1">
+                    <div className="space-y-1 min-w-0">
                       <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 font-mono tabular-nums">
                         <span className="text-sky-400 font-bold">{m.codigo}</span>
                         <span aria-hidden="true">·</span>
@@ -1302,13 +2161,13 @@ export const MinutasTab: React.FC = () => {
                     {m.driveRuta && (
                       <>
                         <span aria-hidden="true">·</span>
-                        <span className="font-sans truncate max-w-sm text-sky-300/90">{m.driveRuta}</span>
+                        <span className="font-sans truncate max-w-full sm:max-w-sm text-sky-300/90">{m.driveRuta}</span>
                       </>
                     )}
                     {m.nombreArchivo && (
                       <>
                         <span aria-hidden="true">·</span>
-                        <span className="font-sans truncate max-w-xs">{m.nombreArchivo}</span>
+                        <span className="font-sans truncate max-w-full sm:max-w-xs">{m.nombreArchivo}</span>
                       </>
                     )}
                     {m.driveUrl && (
@@ -1329,7 +2188,47 @@ export const MinutasTab: React.FC = () => {
 
                   {expandida && (
                     <div className="pt-3 border-t border-slate-800 space-y-3">
-                      <div className="text-xs font-semibold text-slate-300">Contenido íntegro de la minuta</div>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-xs font-semibold text-slate-300">Contenido íntegro de la minuta</div>
+                        {m.contenidoTexto && (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleCopiar(m.id, m.contenidoTexto)}
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                            >
+                              {copiedId === m.id ? (
+                                <Check className="w-3 h-3 text-emerald-400" />
+                              ) : (
+                                <Copy className="w-3 h-3" />
+                              )}
+                              <span>{copiedId === m.id ? 'Copiado' : 'Copiar'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                descargarMarkdownComoWord(
+                                  m.codigo.replace(/[^a-zA-Z0-9_-]/g, '_'),
+                                  `${m.codigo} - ${m.titulo}`,
+                                  m.contenidoTexto
+                                )
+                              }
+                              className="px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                            >
+                              <FileDown className="w-3 h-3" />
+                              <span>Word (.doc)</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => imprimirMarkdownComoPdf(m.codigo, m.contenidoTexto)}
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sky-300 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                            >
+                              <Printer className="w-3 h-3" />
+                              <span>PDF</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
                       <pre className="whitespace-pre-wrap text-xs text-slate-300 bg-slate-950 border border-slate-800 rounded-xl p-4 max-h-80 overflow-y-auto font-sans leading-relaxed">
                         {m.contenidoTexto || 'Sin texto adjunto (minuta registrada por ítems manuales).'}
                       </pre>
@@ -1346,7 +2245,7 @@ export const MinutasTab: React.FC = () => {
       {subVista === 'notas_pedido' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
           {/* Columna Generador */}
-          <form onSubmit={handleGenerarNotaPedido} className="lg:col-span-5 bento-card p-5 space-y-3.5 text-xs">
+          <form onSubmit={handleGenerarNotaPedido} className="lg:col-span-5 bento-card p-3.5 sm:p-5 space-y-3.5 text-xs">
             <div className="pb-3 border-b border-slate-800">
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 <FileWarning className="w-4 h-4 text-rose-400" />
@@ -1535,13 +2434,13 @@ export const MinutasTab: React.FC = () => {
             )}
 
             {notaVisualizada ? (
-              <div className="bento-card p-5 space-y-4">
+              <div className="bento-card p-3 sm:p-5 space-y-4 min-w-0 overflow-hidden">
                 <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
-                  <div>
+                  <div className="min-w-0">
                     <div className="text-xs font-mono font-bold text-rose-300">
                       {notaVisualizada.numeroNota} · {notaVisualizada.fechaEmision}
                     </div>
-                    <h4 className="text-sm font-bold text-white">{notaVisualizada.asunto}</h4>
+                    <h4 className="text-sm font-bold text-white break-words">{notaVisualizada.asunto}</h4>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">

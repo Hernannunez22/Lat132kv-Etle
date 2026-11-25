@@ -693,8 +693,48 @@ function obtenerDatosCompletosAppMovil() {
   // 4. Cronograma Maestro de Hitos Contractuales (desde R2 / Script Properties)
   const cronogramaHitos = obtenerCronogramaHitosContractuales();
 
+  // 5. Total Planificado del Elenco (hoja Elencos_Oficiales_Referencia o 543 por defecto)
+  let totalPlanificadosElenco = 543;
+  let porFrenteElenco = {
+    LAT: 159,
+    Leales: 170,
+    "Villa Quinteros": 114,
+    Bracho: 100
+  };
+  try {
+    const hojaElenco = ss.getSheetByName("Elencos_Oficiales_Referencia");
+    if (hojaElenco && hojaElenco.getLastRow() >= 2) {
+      const codigosUnicos = new Set();
+      const conteoFrentes = { LAT: 0, Leales: 0, "Villa Quinteros": 0, Bracho: 0 };
+      const filasElenco = hojaElenco.getRange(2, 1, hojaElenco.getLastRow() - 1, 2).getValues();
+      for (let i = 0; i < filasElenco.length; i++) {
+        const proyRaw = String(filasElenco[i][0] || "").trim().toLowerCase();
+        const codRaw = String(filasElenco[i][1] || "").trim();
+        const codK = codRaw.toUpperCase().replace(/[^A-Z0-9]/g, "");
+        if (codK && codK !== "CODIGOOFICIAL" && codK !== "CODIGODELPLANO" && !codigosUnicos.has(codK)) {
+          codigosUnicos.add(codK);
+          if (proyRaw.includes("lat") || (proyRaw.includes("bracho") && proyRaw.includes("villa")) || codK.startsWith("LEBVQ")) {
+            conteoFrentes.LAT++;
+          } else if (proyRaw.includes("leales") || codK.startsWith("ETLE")) {
+            conteoFrentes.Leales++;
+          } else if (proyRaw.includes("quinteros") || codK.startsWith("ETVQ")) {
+            conteoFrentes["Villa Quinteros"]++;
+          } else if (proyRaw.includes("bracho") || codK.startsWith("ETBR") || codK.startsWith("ETEB")) {
+            conteoFrentes.Bracho++;
+          }
+        }
+      }
+      if (codigosUnicos.size > 0) {
+        totalPlanificadosElenco = codigosUnicos.size;
+        porFrenteElenco = conteoFrentes;
+      }
+    }
+  } catch (eElenco) {}
+
   return {
     planos: catalogoPlanos,
+    totalPlanificados: totalPlanificadosElenco,
+    porFrente: porFrenteElenco,
     megabytesR2: mbR2,
     interferencias: listaInterferencias,
     pliegos: catalogoPliegos,

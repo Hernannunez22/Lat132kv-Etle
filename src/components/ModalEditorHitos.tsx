@@ -272,31 +272,31 @@ export const ModalEditorHitos: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-      <div className="bento-card max-w-3xl w-full p-6 space-y-4 border-amber-700/60 bg-slate-900 shadow-2xl max-h-[90vh] flex flex-col">
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-2.5 sm:p-4">
+      <div className="bento-card max-w-3xl w-full p-3.5 sm:p-6 space-y-3.5 sm:space-y-4 border-amber-700/60 bg-slate-900 shadow-2xl max-h-[90vh] flex flex-col overflow-hidden">
         {/* Header Modal */}
-        <div className="flex items-center justify-between pb-3 border-b border-slate-800 shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="text-xl">📊</span>
-            <div>
-              <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400">
+        <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-800 shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-xl shrink-0">📊</span>
+            <div className="min-w-0">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400 truncate">
                 Carga / Edición de Cronograma de Hitos
               </h3>
-              <p className="text-[11px] text-slate-400">
+              <p className="text-[11px] text-slate-400 truncate">
                 Persistencia en Base de Datos (Cloudflare R2 / Local)
               </p>
             </div>
           </div>
           <button 
             onClick={() => setIsHitosModalOpen(false)} 
-            className="text-slate-400 hover:text-white font-bold text-sm cursor-pointer"
+            className="text-slate-400 hover:text-white font-bold text-sm cursor-pointer shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Zona de Importación Excel */}
-        <div className="p-4 rounded-xl border-2 border-dashed border-amber-600/60 bg-amber-950/30 text-center space-y-2 shrink-0">
+        <div className="p-3 sm:p-4 rounded-xl border-2 border-dashed border-amber-600/60 bg-amber-950/30 text-center space-y-2 shrink-0">
           <input 
             type="file" 
             id="inputModalExcel" 
@@ -343,25 +343,25 @@ export const ModalEditorHitos: React.FC = () => {
 
           <div className="space-y-2.5">
             {hitosEnEdicion.map((h, idx) => (
-              <div key={h.id || idx} className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-                <div className="flex items-center justify-between gap-2">
+              <div key={h.id || idx} className="p-2.5 sm:p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+                <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2">
                   <input 
                     type="text" 
                     value={h.codigo || ''} 
                     onChange={e => handleUpdate(idx, 'codigo', e.target.value)}
-                    className="w-24 bg-slate-900 border border-slate-700 text-amber-400 font-mono font-bold text-xs p-1.5 rounded-lg"
+                    className="w-20 sm:w-24 bg-slate-900 border border-slate-700 text-amber-400 font-mono font-bold text-xs p-1.5 rounded-lg shrink-0"
                     placeholder="HT-01"
                   />
                   <input 
                     type="text" 
                     value={h.nombre || ''} 
                     onChange={e => handleUpdate(idx, 'nombre', e.target.value)}
-                    className="flex-1 bg-slate-900 border border-slate-700 text-white font-semibold text-xs p-1.5 rounded-lg"
+                    className="min-w-[140px] flex-1 bg-slate-900 border border-slate-700 text-white font-semibold text-xs p-1.5 rounded-lg"
                     placeholder="Nombre del hito..."
                   />
                   <button 
                     onClick={() => handleDeleteHito(idx)} 
-                    className="text-rose-400 hover:text-rose-300 p-1 cursor-pointer" 
+                    className="text-rose-400 hover:text-rose-300 p-1 cursor-pointer shrink-0" 
                     title="Eliminar este hito"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -404,11 +404,11 @@ export const ModalEditorHitos: React.FC = () => {
         </div>
 
         {/* Footer Modal */}
-        <div className="pt-3 flex items-center justify-between border-t border-slate-800 shrink-0">
+        <div className="pt-3 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 border-t border-slate-800 shrink-0">
           <span className="text-[10px] text-slate-500 font-mono flex items-center gap-1">
-            <Lock className="w-3 h-3" /> Persistencia en R2 / Local
+            <Lock className="w-3 h-3 shrink-0" /> Persistencia en R2 / Local
           </span>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <button 
               onClick={() => setIsHitosModalOpen(false)} 
               className="px-3.5 py-2 bg-slate-800 text-slate-300 rounded-xl text-xs font-semibold hover:bg-slate-700 cursor-pointer"
@@ -418,7 +418,7 @@ export const ModalEditorHitos: React.FC = () => {
             <button 
               onClick={handleSaveDefinitivo} 
               disabled={isSaving}
-              className="px-5 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-bold shadow-md flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+              className="px-4 sm:px-5 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-bold shadow-md flex items-center gap-1.5 cursor-pointer disabled:opacity-60 whitespace-nowrap"
             >
               <Save className="w-3.5 h-3.5" />
               <span>{isSaving ? 'Guardando...' : 'Guardar Cronograma'}</span>

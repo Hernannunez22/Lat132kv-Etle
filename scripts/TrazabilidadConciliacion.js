@@ -131,9 +131,17 @@ function actualizarYVerificarCambiosEnElencos() {
     });
   }
 
-  // 2. Localizar la carpeta 'Elenco de documentos de ingeniería' en Drive
+  // 2. Localizar la carpeta oficial de Elencos en Drive (por ID directo o búsqueda recursiva)
   const carpetaRaiz = DriveApp.getFolderById(ID_CARPETA_RAIZ);
   let carpetaElencos = null;
+
+  try {
+    if (typeof ID_CARPETA_ELENCOS !== "undefined" && ID_CARPETA_ELENCOS) {
+      carpetaElencos = DriveApp.getFolderById(ID_CARPETA_ELENCOS);
+    }
+  } catch (eIdElenco) {
+    carpetaElencos = null;
+  }
 
   function buscarCarpetaElencoRec(folder) {
     const nNorm = normalizarTexto(folder.getName());
@@ -149,7 +157,9 @@ function actualizarYVerificarCambiosEnElencos() {
     }
   }
 
-  buscarCarpetaElencoRec(carpetaRaiz);
+  if (!carpetaElencos) {
+    buscarCarpetaElencoRec(carpetaRaiz);
+  }
 
   if (!carpetaElencos) {
     ss.toast("No se encontró la carpeta de Elencos en Drive. Se verificará con los datos cargados.", "Aviso", 5);
@@ -887,7 +897,7 @@ function generarReporteComparacionElencos() {
     });
   }
 
-  const totalPlanificados = totalPlanificadosMap.size > 0 ? totalPlanificadosMap.size : 910;
+  const totalPlanificados = totalPlanificadosMap.size > 0 ? totalPlanificadosMap.size : 543;
   const totalCargados = planosConciliadosLista.length;
   const faltantesGlobales = Math.max(0, totalPlanificados - totalCargados);
   const pctGlobal = totalPlanificados > 0 ? Math.min(100, Math.round((totalCargados / totalPlanificados) * 100)) : 0;
@@ -917,10 +927,10 @@ function generarReporteComparacionElencos() {
 
     // Proyectos contractuales (Filas 7 a 10)
     const proyectosOrden = [
-      { fila: 7, nombre: "ET Leales", plan: planificadosPorProyCount["ET Leales"] || 529 },
-      { fila: 8, nombre: "ET El Bracho", plan: planificadosPorProyCount["ET El Bracho"] || 99 },
-      { fila: 9, nombre: "ET Villa Quinteros", plan: planificadosPorProyCount["ET Villa Quinteros"] || (planificadosPorProyCount["Villa Quinteros"] || 282) },
-      { fila: 10, nombre: "LAT El Bracho - Villa Quinteros", plan: planificadosPorProyCount["LAT El Bracho - Villa Quinteros"] || 173 }
+      { fila: 7, nombre: "ET Leales", plan: planificadosPorProyCount["ET Leales"] || 170 },
+      { fila: 8, nombre: "ET El Bracho", plan: planificadosPorProyCount["ET El Bracho"] || 100 },
+      { fila: 9, nombre: "ET Villa Quinteros", plan: planificadosPorProyCount["ET Villa Quinteros"] || (planificadosPorProyCount["Villa Quinteros"] || 114) },
+      { fila: 10, nombre: "LAT El Bracho - Villa Quinteros", plan: planificadosPorProyCount["LAT El Bracho - Villa Quinteros"] || 159 }
     ];
 
     let totalCerradosApcGlobal = 0;

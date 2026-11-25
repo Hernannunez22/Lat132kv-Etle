@@ -6,6 +6,7 @@ import {
   normalizarFechaIso,
 } from './minutasManager';
 import { CompromisoMinuta, MinutaReunion } from '../src/types';
+import { generarContenidoConFallback } from './geminiClient';
 
 export const DEFAULT_DRIVE_ROOT_FOLDER_ID = '1hRZXHfqmcFdhiHj2Fbx1IV9gCCVX7edw';
 
@@ -101,18 +102,33 @@ async function driveFetchJson<T>(url: string, accessToken: string): Promise<T> {
       Authorization: `Bearer ${accessToken}`,
     },
   });
+  const rawText = await res.text().catch(() => '');
   if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    let parsedMsg = errText;
+    let parsedMsg = rawText;
     try {
-      const j = JSON.parse(errText);
-      parsedMsg = j?.error?.message || errText;
-    } catch {}
+      const j = JSON.parse(rawText);
+      parsedMsg = j?.error?.message || rawText;
+    } catch {
+      if (/^\s*</.test(rawText)) {
+        parsedMsg = `Google Drive devolvió HTML en lugar de JSON (HTTP ${res.status}). Verifica tu sesión de Google.`;
+      }
+    }
     const error = new Error(parsedMsg || `Google Drive API HTTP ${res.status}`) as Error & { status?: number };
     error.status = res.status;
     throw error;
   }
-  return res.json() as Promise<T>;
+  if (/^\s*</.test(rawText)) {
+    const error = new Error(
+      'Google Drive devolvió una página HTML en lugar de datos JSON (posible sesión expirada).'
+    ) as Error & { status?: number };
+    error.status = 401;
+    throw error;
+  }
+  try {
+    return JSON.parse(rawText) as T;
+  } catch {
+    throw new Error('Google Drive devolvió una respuesta no válida (JSON malformado).');
+  }
 }
 
 async function listarHijosCarpetaDrive(
@@ -263,7 +279,8 @@ async function extraerTextoConOcrGeminiSiEscaneado(
 ): Promise<string> {
   if (!ai || buffer.length === 0 || buffer.length > 18 * 1024 * 1024) return '';
   try {
-    const resp = await ai.models.generateContent({
+    const { response: resp } = await generarContenidoConFallback({
+      ai,
       model,
       contents: [
         {
@@ -280,6 +297,7 @@ async function extraerTextoConOcrGeminiSiEscaneado(
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
+      timeoutMs: 20000,
     });
     return (resp.text || '').trim();
   } catch (err) {

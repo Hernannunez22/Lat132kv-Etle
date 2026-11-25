@@ -134,7 +134,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, cla
       blocks.push(
         <div
           key={blockKey++}
-          className="my-3 overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/90"
+          className="my-3 w-full max-w-full overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/90"
         >
           <table className="w-full border-collapse text-left text-[11px] leading-relaxed">
             <thead>
@@ -267,5 +267,5 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, cla
     idx++;
   }
 
-  return <div className={`space-y-1 text-xs ${className}`}>{blocks}</div>;
+  return <div className={`space-y-1 text-xs min-w-0 max-w-full break-words ${className}`}>{blocks}</div>;
 };

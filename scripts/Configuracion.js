@@ -8,6 +8,7 @@
 // Clave de respaldo inicial; se migra y lee de forma segura desde PropertiesService
 const GEMINI_API_KEY_FALLBACK = "AIzaSyCkQOGyG6Ct-r4_UzwJnmteZul75ddhZ6c";
 const ID_CARPETA_RAIZ = "1hRZXHfqmcFdhiHj2Fbx1IV9gCCVX7edw";
+const ID_CARPETA_ELENCOS = "1Dmg0tKE6glZR0EYrjujzD_iJCZJnljrj";
 const NOMBRE_CARPETA_ELENCOS = "Elenco de documentos de ingeniería";
 
 // Umbrales contractuales de SLA (Días corridos en poder de un actor)

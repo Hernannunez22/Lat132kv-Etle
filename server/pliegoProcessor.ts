@@ -4,6 +4,8 @@ import os from 'os';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import mammoth from 'mammoth';
 import { GoogleGenAI } from '@google/genai';
+import { sanitizeSafeId } from './authMiddleware';
+import { analizarYExpandirConsulta } from './semanticSearch';
 
 export interface PliegoChunk {
   id: string;
@@ -43,12 +45,14 @@ export function asegurarDirectorioCache() {
 
 export function getRutaStaging(id: string): string {
   asegurarDirectorioCache();
-  return path.join(CACHE_DIR, `${id}.part`);
+  const safeId = sanitizeSafeId(id, 'pliegoId');
+  return path.join(CACHE_DIR, `${safeId}.part`);
 }
 
 export function getRutaUploadTemp(id: string): string {
   asegurarDirectorioCache();
-  return path.join(CACHE_DIR, `${id}.upload`);
+  const safeId = sanitizeSafeId(id, 'pliegoId');
+  return path.join(CACHE_DIR, `${safeId}.upload`);
 }
 
 export function normalizarTextoBusqueda(str: string): string {
@@ -190,7 +194,7 @@ async function extraerTextoDePdfArchivo(
 /**
  * Extrae texto de un Buffer en memoria (archivos chicos < 4 MB).
  */
-async function extraerTextoDePdfBuffer(buffer: Buffer): Promise<{
+export async function extraerTextoDePdfBuffer(buffer: Buffer): Promise<{
   paginasTexto: { pagina: number; texto: string }[];
   totalPaginas: number;
 }> {
@@ -214,7 +218,7 @@ async function extraerTextoDePdfBuffer(buffer: Buffer): Promise<{
 /**
  * Divide páginas o texto plano en fragmentos indexados (~1,600 caracteres con solapamiento).
  */
-function construirChunks(
+export function construirChunks(
   pliegoId: string,
   pliegoNombre: string,
   paginasTexto: { pagina: number; texto: string }[]
@@ -271,7 +275,7 @@ function construirChunks(
   return chunks;
 }
 
-function dividirTextoEnPaginasSimuladas(rawText: string): { pagina: number; texto: string }[] {
+export function dividirTextoEnPaginasSimuladas(rawText: string): { pagina: number; texto: string }[] {
   const paginasTexto: { pagina: number; texto: string }[] = [];
   const lines = rawText.split(/\n+/);
   let currentBlock = '';
@@ -305,7 +309,8 @@ export async function procesarArchivoDesdeDisco(params: {
   const t0 = Date.now();
   asegurarDirectorioCache();
 
-  const { id, nombre, tipoMime, rutaArchivo, tamanioBytes, fechaSubida, onProgress } = params;
+  const { nombre, tipoMime, rutaArchivo, tamanioBytes, fechaSubida, onProgress } = params;
+  const id = sanitizeSafeId(params.id, 'pliegoId');
   const nombreLower = nombre.toLowerCase();
   const esPdf = tipoMime === 'application/pdf' || nombreLower.endsWith('.pdf');
   const esDocx =
@@ -412,7 +417,8 @@ export async function procesarArchivoPliego(params: {
   const t0 = Date.now();
   asegurarDirectorioCache();
 
-  const { id, nombre, tipoMime, buffer, fechaSubida } = params;
+  const { nombre, tipoMime, buffer, fechaSubida } = params;
+  const id = sanitizeSafeId(params.id, 'pliegoId');
   const nombreLower = nombre.toLowerCase();
   const esPdf = tipoMime === 'application/pdf' || nombreLower.endsWith('.pdf');
   const esDocx =
@@ -502,7 +508,8 @@ export function procesarTextoPliego(params: {
   const t0 = Date.now();
   asegurarDirectorioCache();
 
-  const { id, nombre, contenidoTexto, fechaSubida } = params;
+  const { nombre, contenidoTexto, fechaSubida } = params;
+  const id = sanitizeSafeId(params.id, 'pliegoId');
   const cleanText = contenidoTexto.trim();
   const bytes = Buffer.byteLength(cleanText, 'utf-8');
 
@@ -531,7 +538,8 @@ export function procesarTextoPliego(params: {
 function guardarPliegoEnDisco(pliego: PliegoIndexado) {
   try {
     asegurarDirectorioCache();
-    const jsonPath = path.join(CACHE_DIR, `${pliego.id}.json`);
+    const safeId = sanitizeSafeId(pliego.id, 'pliegoId');
+    const jsonPath = path.join(CACHE_DIR, `${safeId}.json`);
     fs.writeFileSync(jsonPath, JSON.stringify(pliego), 'utf-8');
   } catch (err) {
     console.warn('[PliegoProcessor] No se pudo escribir caché en disco:', err);
@@ -561,9 +569,10 @@ export function cargarPliegosDesdeDisco(): PliegoIndexado[] {
 }
 
 export function eliminarPliegoDeDisco(id: string) {
+  const safeId = sanitizeSafeId(id, 'pliegoId');
   try {
     for (const ext of ['.json', '.pdf', '.part', '.upload']) {
-      const p = path.join(CACHE_DIR, `${id}${ext}`);
+      const p = path.join(CACHE_DIR, `${safeId}${ext}`);
       if (fs.existsSync(p)) fs.unlinkSync(p);
     }
   } catch (err) {
@@ -669,7 +678,7 @@ export function extraerMetricasTecnicas(texto: string): string[] {
 export function recuperarFragmentosRelevantes(
   consulta: string,
   pliegos: PliegoIndexado[],
-  maxCharsTotales = 110000
+  maxCharsTotales = 180000
 ): {
   contextoTexto: string;
   fragmentosSeleccionados: { pliegoNombre: string; pagina: number; texto: string; score: number }[];
@@ -698,25 +707,29 @@ export function recuperarFragmentosRelevantes(
   }
 
   const consultaNorm = normalizarTextoBusqueda(consulta);
+  const expandida = analizarYExpandirConsulta(consulta);
+  const tokensNucleoSet = new Set(expandida.tokensNucleo);
   const tokens = Array.from(
-    new Set(
-      consultaNorm
-        .split(/\s+/)
-        .filter(t => t.length >= 2 && !STOPWORDS_ES.has(t))
-    )
-  );
+    new Set([
+      ...consultaNorm.split(/\s+/).filter(t => t.length >= 2 && !STOPWORDS_ES.has(t)),
+      ...expandida.tokensExpandidos.filter(t => t.length >= 2 && !STOPWORDS_ES.has(t)),
+    ])
+  ).slice(0, 56);
 
   // Compilar regex de palabra completa para precisión (evita falsos positivos por subcadena)
   const tokenMatchers = tokens.map(tok => {
     const esc = tok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const esNucleo = tokensNucleoSet.has(tok) || consultaNorm.includes(tok);
+    const baseWeight = tok.length >= 6 ? 14 : tok.length >= 4 ? 10 : 12;
     return {
       tok,
       wordRx: new RegExp(`\\b${esc}\\b`, 'g'),
       isShort: tok.length <= 3,
-      weight: tok.length >= 6 ? 14 : tok.length >= 4 ? 10 : 12,
+      weight: esNucleo ? baseWeight : Math.max(4, Math.round(baseWeight * 0.55)),
     };
   });
 
+  const frasesClave = expandida.frasesClave.filter(f => f.length >= 5).slice(0, 20);
   const regexNumArt = consultaNorm.match(/\b(?:art(?:iculo)?\.?\s*\d+|\d+(?:[.,]\d+)?)\b/g) || [];
   const porDocumento: Array<Array<PliegoChunk & { score: number }>> = [];
 
@@ -729,8 +742,13 @@ export function recuperarFragmentosRelevantes(
       if (tokenMatchers.length === 0) {
         score = chunk.pagina <= 8 ? 25 - chunk.pagina : 1;
       } else {
-        if (consultaNorm.length > 8 && tNorm.includes(consultaNorm)) {
+        if (consultaNorm.length > 8 && consultaNorm.length < 180 && tNorm.includes(consultaNorm)) {
           score += 65;
+        }
+        for (const frase of frasesClave) {
+          if (tNorm.includes(frase)) {
+            score += 28;
+          }
         }
         let distintos = 0;
         for (const tm of tokenMatchers) {
@@ -741,11 +759,11 @@ export function recuperarFragmentosRelevantes(
           } else if (!tm.isShort && tNorm.includes(tm.tok)) {
             distintos++;
             const occurrences = Math.min(3, tNorm.split(tm.tok).length - 1);
-            score += 4 * occurrences;
+            score += Math.max(2, Math.round(tm.weight * 0.4)) * occurrences;
           }
         }
         if (distintos > 1) {
-          score += distintos * 16;
+          score += Math.min(12, distintos) * 14;
         }
         for (const ref of regexNumArt) {
           if (tNorm.includes(ref)) score += 15;
@@ -768,11 +786,11 @@ export function recuperarFragmentosRelevantes(
   // Selección round-robin balanceada para que ningún pliego quede excluido en comparaciones multi-documento
   const elegidos: { pliegoNombre: string; pagina: number; texto: string; score: number }[] = [];
   const intros = pliegosConTexto
-    .map(p => `[RESUMEN INICIAL DE "${p.nombre}" (${p.paginas} págs.)]:\n${p.introTexto.slice(0, 1400)}`)
+    .map(p => `[RESUMEN INICIAL DE "${p.nombre}" (${p.paginas} págs.)]:\n${(p.introTexto || p.contenidoTexto || '').slice(0, 1400)}`)
     .join('\n\n');
   let charsAcumulados = intros.length;
 
-  const maxSlots = 52;
+  const maxSlots = 76;
   let ronda = 0;
   while (elegidos.length < maxSlots && charsAcumulados < maxCharsTotales) {
     let agregoEnRonda = false;
@@ -798,7 +816,9 @@ export function recuperarFragmentosRelevantes(
   }
 
   elegidos.sort((a, b) => {
-    if (a.pliegoNombre !== b.pliegoNombre) return a.pliegoNombre.localeCompare(b.pliegoNombre);
+    const nA = a.pliegoNombre || '';
+    const nB = b.pliegoNombre || '';
+    if (nA !== nB) return nA.localeCompare(nB);
     return a.pagina - b.pagina;
   });
 
