@@ -60,6 +60,7 @@ import {
 } from '../utils/corporateAuth';
 import {
   BOOTSTRAP_ADMIN_EMAIL,
+  WorkspaceIAControlState,
   WorkspaceInviteRecord,
   WorkspaceSessionInfo,
   backfillWorkspaceMemberUids,
@@ -101,6 +102,12 @@ export interface AudioMinutaResultado {
   modeloTranscripcion: string;
   fuenteRedaccion: string;
   modeloReferenciaUsado: string | null;
+}
+
+export interface DriveSyncSnapshot {
+  fechaIso: string;
+  tipo: string;
+  resumen: string;
 }
 
 export type CloudSyncStatus =
@@ -205,6 +212,7 @@ interface AppContextType {
   driveFolderId: string;
   setDriveFolderId: (val: string) => void;
   driveConnectionState: DriveConnectionState;
+  ultimaSyncDrive: DriveSyncSnapshot | null;
   verificarConexionDriveLive: (
     folderIdOverride?: string,
     tokenOverride?: string
@@ -362,7 +370,15 @@ interface AppContextType {
   geminiPrecisionState: GeminiPrecisionState | null;
   esUsuarioMaestro: boolean;
   modelosPagosHabilitados: boolean;
+  puedeUsarModelosPagos: boolean;
+  usuariosPagosAutorizados: string[];
+  limitesPorUsuarioUsd: Record<string, number>;
   toggleModelosPagosMaestro: (habilitado: boolean) => Promise<GeminiPrecisionState | null>;
+  actualizarControlMaestroIA: (payload: {
+    modelosPagosHabilitados?: boolean;
+    usuariosPagosAutorizados?: string[];
+    limitesPorUsuarioUsd?: Record<string, number>;
+  }) => Promise<GeminiPrecisionState | null>;
   refrescarEstadoGemini: () => Promise<GeminiPrecisionState | null>;
   guardarConfigPrecision: (payload: {
     nivelPreferido?: PrecisionNivelId;
@@ -444,11 +460,36 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [driveFolderId, setDriveFolderIdState] = useState<string>(
     () => localStorage.getItem('drive_folder_notas_libro_132kv') || DEFAULT_DRIVE_ROOT_FOLDER_ID
   );
+  const [ultimaSyncDrive, setUltimaSyncDrive] = useState<DriveSyncSnapshot | null>(() => {
+    try {
+      const saved = localStorage.getItem('ultima_sync_drive_132kv');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed.fechaIso === 'string') return parsed as DriveSyncSnapshot;
+      }
+    } catch {}
+    return null;
+  });
+  const registrarSyncDrive = useCallback((tipo: string, resumen: string) => {
+    const snap: DriveSyncSnapshot = {
+      fechaIso: new Date().toISOString(),
+      tipo,
+      resumen,
+    };
+    setUltimaSyncDrive(snap);
+    try {
+      localStorage.setItem('ultima_sync_drive_132kv', JSON.stringify(snap));
+    } catch {}
+  }, []);
   const setDriveFolderId = useCallback((val: string) => {
     setDriveFolderIdState(val);
     try {
       localStorage.setItem('drive_folder_notas_libro_132kv', val);
     } catch {}
+    const sess = cloudSessionRef.current;
+    if (sess && sess.role === 'admin' && val.trim()) {
+      syncWorkspaceSettingsFields(sess, { defaultDriveFolderId: val.trim() }).catch(() => {});
+    }
   }, []);
   const [driveConnectionState, setDriveConnectionState] = useState<DriveConnectionState>(() => {
     const info = getGoogleDriveTokenInfo();
@@ -597,7 +638,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return 'gratuito';
   });
   const [geminiPrecisionState, setGeminiPrecisionState] = useState<GeminiPrecisionState | null>(null);
-  const [firestoreIAControl, setFirestoreIAControl] = useState<boolean | null>(null);
+  const [firestoreIAControl, setFirestoreIAControl] = useState<WorkspaceIAControlState | null>(null);
 
   const esUsuarioMaestro = Boolean(
     cloudSession?.email?.toLowerCase().trim() === BOOTSTRAP_ADMIN_EMAIL ||
@@ -605,8 +646,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   );
   const modelosPagosHabilitados =
     firestoreIAControl !== null
-      ? firestoreIAControl
+      ? firestoreIAControl.modelosPagosHabilitados
       : Boolean(geminiPrecisionState?.modelosPagosHabilitados);
+  const usuariosPagosAutorizados =
+    firestoreIAControl !== null
+      ? firestoreIAControl.usuariosPagosAutorizados
+      : geminiPrecisionState?.usuariosPagosAutorizados || [];
+  const limitesPorUsuarioUsd =
+    firestoreIAControl?.limitesPorUsuarioUsd && Object.keys(firestoreIAControl.limitesPorUsuarioUsd).length > 0
+      ? firestoreIAControl.limitesPorUsuarioUsd
+      : geminiPrecisionState?.limitesPorUsuarioUsd || {};
+  const puedeUsarModelosPagos = (() => {
+    if (!modelosPagosHabilitados) return false;
+    if (firestoreIAControl !== null) {
+      const emailActual = cloudSession?.email?.toLowerCase().trim();
+      return Boolean(emailActual && firestoreIAControl.usuariosPagosAutorizados.includes(emailActual));
+    }
+    return Boolean(geminiPrecisionState?.puedeUsarModelosPagos);
+  })();
 
   const setPrecisionNivel = useCallback((nivel: PrecisionNivelId) => {
     setPrecisionNivelState(nivel);
@@ -616,10 +673,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   useEffect(() => {
-    if (!modelosPagosHabilitados && precisionNivel !== 'gratuito') {
+    if (!puedeUsarModelosPagos && precisionNivel !== 'gratuito') {
       setPrecisionNivel('gratuito');
     }
-  }, [modelosPagosHabilitados, precisionNivel, setPrecisionNivel]);
+  }, [puedeUsarModelosPagos, precisionNivel, setPrecisionNivel]);
 
   const refrescarEstadoGemini = useCallback(async (): Promise<GeminiPrecisionState | null> => {
     try {
@@ -634,21 +691,65 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return null;
   }, []);
 
-  const toggleModelosPagosMaestro = useCallback(
-    async (habilitado: boolean): Promise<GeminiPrecisionState | null> => {
+  const actualizarControlMaestroIA = useCallback(
+    async (payload: {
+      modelosPagosHabilitados?: boolean;
+      usuariosPagosAutorizados?: string[];
+      limitesPorUsuarioUsd?: Record<string, number>;
+    }): Promise<GeminiPrecisionState | null> => {
       const sess = cloudSessionRef.current;
       const esMaestroActual = Boolean(
         sess?.email?.toLowerCase().trim() === BOOTSTRAP_ADMIN_EMAIL ||
           geminiPrecisionState?.esUsuarioMaestro
       );
       if (!esMaestroActual) {
-        throw new Error('Solo el administrador maestro puede habilitar o ocultar los modelos pagos.');
+        throw new Error('Solo el administrador maestro puede administrar el acceso a modelos pagos.');
+      }
+
+      const nextHabilitado =
+        typeof payload.modelosPagosHabilitados === 'boolean'
+          ? payload.modelosPagosHabilitados
+          : modelosPagosHabilitados;
+
+      let nextUsers = Array.isArray(payload.usuariosPagosAutorizados)
+        ? Array.from(
+            new Set(
+              payload.usuariosPagosAutorizados
+                .map(e => String(e || '').trim().toLowerCase())
+                .filter(e => e.includes('@') && e.includes('.'))
+            )
+          ).sort()
+        : [...usuariosPagosAutorizados];
+
+      if (
+        payload.modelosPagosHabilitados === true &&
+        !Array.isArray(payload.usuariosPagosAutorizados) &&
+        nextUsers.length === 0
+      ) {
+        nextUsers = [BOOTSTRAP_ADMIN_EMAIL];
+      }
+
+      const rawLimits =
+        payload.limitesPorUsuarioUsd && typeof payload.limitesPorUsuarioUsd === 'object'
+          ? payload.limitesPorUsuarioUsd
+          : limitesPorUsuarioUsd;
+      const nextLimits: Record<string, number> = {};
+      for (const [emailKey, usdVal] of Object.entries(rawLimits)) {
+        const cleanEmail = String(emailKey || '').trim().toLowerCase();
+        const num = Number(usdVal);
+        if (cleanEmail.includes('@') && Number.isFinite(num) && num > 0) {
+          nextLimits[cleanEmail] = Math.round(num * 100) / 100;
+        }
       }
 
       const res = await apiFetch('/api/gemini/master-control', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelosPagosHabilitados: Boolean(habilitado) }),
+        body: JSON.stringify({
+          modelosPagosHabilitados: nextHabilitado,
+          usuariosPagosAutorizados: nextUsers,
+          limitesPorUsuarioUsd: nextLimits,
+        }),
       });
       const data = await readJsonResponse(res, 'Error actualizando control maestro de IA');
       let updatedState: GeminiPrecisionState | null = null;
@@ -658,16 +759,34 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
 
       if (sess) {
-        await setWorkspaceIAControl(sess, Boolean(habilitado));
-        setFirestoreIAControl(Boolean(habilitado));
+        const nextControl: WorkspaceIAControlState = {
+          modelosPagosHabilitados: nextHabilitado,
+          usuariosPagosAutorizados: nextUsers,
+          limitesPorUsuarioUsd: nextLimits,
+        };
+        await setWorkspaceIAControl(sess, nextControl);
+        setFirestoreIAControl(nextControl);
       }
 
-      if (!habilitado) {
+      if (!nextHabilitado) {
         setPrecisionNivel('gratuito');
       }
       return updatedState;
     },
-    [geminiPrecisionState?.esUsuarioMaestro, setPrecisionNivel]
+    [
+      geminiPrecisionState?.esUsuarioMaestro,
+      modelosPagosHabilitados,
+      usuariosPagosAutorizados,
+      limitesPorUsuarioUsd,
+      setPrecisionNivel,
+    ]
+  );
+
+  const toggleModelosPagosMaestro = useCallback(
+    async (habilitado: boolean): Promise<GeminiPrecisionState | null> => {
+      return actualizarControlMaestroIA({ modelosPagosHabilitados: Boolean(habilitado) });
+    },
+    [actualizarControlMaestroIA]
   );
 
   const guardarConfigPrecision = useCallback(
@@ -677,7 +796,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       openRouterModeloPreferido?: string;
       limitesPorModelo?: Record<string, { maxConsultasDiarias?: number; maxCostoUsdDiario?: number }>;
     }): Promise<GeminiPrecisionState | null> => {
-      const effectivePayload = !modelosPagosHabilitados
+      const effectivePayload = !puedeUsarModelosPagos
         ? { ...payload, nivelPreferido: 'gratuito' as PrecisionNivelId }
         : payload;
       if (effectivePayload.nivelPreferido) {
@@ -695,7 +814,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return null;
     },
-    [modelosPagosHabilitados, setPrecisionNivel]
+    [puedeUsarModelosPagos, setPrecisionNivel]
   );
 
   const resetearUsoGemini = useCallback(
@@ -733,7 +852,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (val === null) {
         if (esMaestroSess && !masterInitSeededRef.current) {
           masterInitSeededRef.current = true;
-          void setWorkspaceIAControl(cloudSession, false).catch(() => {
+          void setWorkspaceIAControl(cloudSession, {
+            modelosPagosHabilitados: false,
+            usuariosPagosAutorizados: [],
+            limitesPorUsuarioUsd: {},
+          }).catch(() => {
             masterInitSeededRef.current = false;
           });
         }
@@ -744,7 +867,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         void apiFetch('/api/gemini/master-control', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ modelosPagosHabilitados: val }),
+          body: JSON.stringify({
+            modelosPagosHabilitados: val.modelosPagosHabilitados,
+            usuariosPagosAutorizados: val.usuariosPagosAutorizados,
+            limitesPorUsuarioUsd: val.limitesPorUsuarioUsd || {},
+          }),
         })
           .then(r => (r.ok ? r.json() : null))
           .then(data => {
@@ -1088,6 +1215,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             localStorage.setItem('notas_obra_132kv', ws.notasCampo);
             if (ws.ultimoInforme) setUltimoInformeState(ws.ultimoInforme);
             if (ws.megabytesR2) setMegabytesR2(ws.megabytesR2);
+            if (ws.defaultDriveFolderId && ws.defaultDriveFolderId.trim()) {
+              setDriveFolderIdState(ws.defaultDriveFolderId.trim());
+              try {
+                localStorage.setItem('drive_folder_notas_libro_132kv', ws.defaultDriveFolderId.trim());
+              } catch {}
+            }
             setCloudSession(prev => (prev ? { ...prev, memberUids: ws.memberUids } : prev));
 
             if (session.role === 'admin' && ws.memberUids.length > 1) {
@@ -1976,6 +2109,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const anteriores = [...interferencias];
     setInterferencias(nuevas);
     localStorage.setItem('cache_interferencias_132kv', JSON.stringify(nuevas));
+    registrarSyncDrive('Interferencias y Cruces', `${nuevas.length} cruces sincronizados desde Drive`);
 
     const sess = cloudSessionRef.current;
     if (sess) {
@@ -2033,6 +2167,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     try {
       localStorage.setItem('cache_notas_libro_132kv', JSON.stringify(nuevas));
     } catch {}
+    registrarSyncDrive('Libro de Comunicaciones', `${nuevas.length} notas indexadas desde Drive`);
 
     const sess = cloudSessionRef.current;
     if (sess) {
@@ -2209,6 +2344,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setCompromisosMinutas(cList);
     setNotasPedido(npList);
     persistirMinutasLocal(mList, cList, npList);
+    registrarSyncDrive('Minutas de Reunión', `${mList.length} minutas · ${cList.length} compromisos`);
 
     const sess = cloudSessionRef.current;
     if (sess) {
@@ -2304,7 +2440,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const totalMB = (totalBytes / (1024 * 1024)).toFixed(1);
 
     const motorEfectivo: 'gratuito' | 'gemini' =
-      modelosPagosHabilitados && options?.motor === 'gemini' ? 'gemini' : 'gratuito';
+      puedeUsarModelosPagos && options?.motor === 'gemini' ? 'gemini' : 'gratuito';
 
     if (totalBytes <= 3.5 * 1024 * 1024) {
       onProgress?.({
@@ -2686,6 +2822,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }, params?.accessToken);
 
         aplicarResultadoElencos(data);
+        registrarSyncDrive(
+          'Elencos Oficiales',
+          `${Number(data.totalPlanificados || TOTAL_PLANIFICADOS_CONTRATO_GLOBAL)} planos planificados`
+        );
         return {
           totalPlanificados: Number(data.totalPlanificados || TOTAL_PLANIFICADOS_CONTRATO_GLOBAL),
           porFrente: (data.porFrente || {}) as Record<string, number>,
@@ -3352,6 +3492,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const total = Number(data.totalIndexados || 0);
     setDriveDocsCount(total);
+    registrarSyncDrive('Docs Técnicos Drive', `${total} documentos técnicos en caché`);
     return {
       totalIndexados: total,
       nuevos: Number(data.nuevos || 0),
@@ -3388,7 +3529,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         contextoObra,
         driveAccessToken,
         driveFolderId: driveFolderIdParam,
-        precisionNivel: modelosPagosHabilitados ? precisionOverride || precisionNivel : 'gratuito',
+        precisionNivel: puedeUsarModelosPagos ? precisionOverride || precisionNivel : 'gratuito',
       }),
     });
 
@@ -3582,7 +3723,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const sendChatMessage = async (msg: string, precisionOverride?: PrecisionNivelId) => {
     if (!msg.trim()) return;
-    const nivelActivo: PrecisionNivelId = modelosPagosHabilitados
+    const nivelActivo: PrecisionNivelId = puedeUsarModelosPagos
       ? precisionOverride || precisionNivel
       : 'gratuito';
 
@@ -3709,7 +3850,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       if (res.status === 429 || data?.limitReached) {
         const msgLimite = `> ⚠️ **Límite diario de uso/costo alcanzado:** ${data?.error || 'Se alcanzó el límite configurado para este modelo.'}\n\n${
-          modelosPagosHabilitados
+          puedeUsarModelosPagos
             ? 'Puedes cambiar al nivel **Gratuito · $0** o **Económico · Rápido** en el selector superior del chat o ampliar/reiniciar los límites diarios en **Límites y costos**.'
             : 'Puedes ajustar el tope a 0 (sin límite) o reiniciar el contador hoy en **Límites y costos**.'
         }`;
@@ -3824,6 +3965,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         driveFolderId,
         setDriveFolderId,
         driveConnectionState,
+        ultimaSyncDrive,
         verificarConexionDriveLive,
         conectarGoogleDriveChat,
         desconectarGoogleDrive,
@@ -3862,7 +4004,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         geminiPrecisionState,
         esUsuarioMaestro,
         modelosPagosHabilitados,
+        puedeUsarModelosPagos,
+        usuariosPagosAutorizados,
+        limitesPorUsuarioUsd,
         toggleModelosPagosMaestro,
+        actualizarControlMaestroIA,
         refrescarEstadoGemini,
         guardarConfigPrecision,
         resetearUsoGemini,

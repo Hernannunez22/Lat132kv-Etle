@@ -1,4 +1,5 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { useApp, SubidaProgresoInfo } from '../context/AppContext';
 import { PlanoComparacionDoc } from '../types';
 import { apiFetch, tryReadJsonResponse } from '../utils/apiClient';
@@ -17,7 +18,507 @@ import {
   FileCheck2,
   MessageSquare,
   Loader2,
+  Eye,
+  Layers,
+  SplitSquareHorizontal,
+  Columns2,
+  ChevronLeft,
+  ChevronRight,
+  RotateCcw,
 } from 'lucide-react';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/legacy/build/pdf.worker.min.mjs',
+  import.meta.url
+).toString();
+
+type ModoVisualPdf = 'lado_a_lado' | 'superposicion' | 'deslizador';
+
+async function renderPdfPageToCanvas(
+  pdfDoc: any,
+  pageNum: number,
+  scale: number
+): Promise<HTMLCanvasElement> {
+  const safePage = Math.max(1, Math.min(pageNum, pdfDoc.numPages || 1));
+  const page = await pdfDoc.getPage(safePage);
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.floor(viewport.width));
+  canvas.height = Math.max(1, Math.floor(viewport.height));
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+  }
+  return canvas;
+}
+
+const VisorComparadorVisualPdf: React.FC<{
+  planoA: PlanoComparacionDoc;
+  planoB: PlanoComparacionDoc | null;
+}> = ({ planoA, planoB }) => {
+  const [abierto, setAbierto] = useState(true);
+  const [modo, setModo] = useState<ModoVisualPdf>(planoB ? 'superposicion' : 'lado_a_lado');
+  const [pagina, setPagina] = useState(1);
+  const [totalPaginas, setTotalPaginas] = useState(1);
+  const [zoom, setZoom] = useState<number>(1.0);
+  const [opacidadB, setOpacidadB] = useState<number>(0.65);
+  const [offsetX, setOffsetX] = useState<number>(0);
+  const [offsetY, setOffsetY] = useState<number>(0);
+  const [resaltarDiff, setResaltarDiff] = useState<boolean>(true);
+  const [splitPct, setSplitPct] = useState<number>(50);
+  const [cargando, setCargando] = useState(false);
+  const [errorPdf, setErrorPdf] = useState<string | null>(null);
+  const [ratioDiffPct, setRatioDiffPct] = useState<number | null>(null);
+
+  const docARef = useRef<any>(null);
+  const docBRef = useRef<any>(null);
+  const canvasSideARef = useRef<HTMLCanvasElement>(null);
+  const canvasSideBRef = useRef<HTMLCanvasElement>(null);
+  const canvasOverlayRef = useRef<HTMLCanvasElement>(null);
+  const canvasSplitARef = useRef<HTMLCanvasElement>(null);
+  const canvasSplitBRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    let cancelado = false;
+    setCargando(true);
+    setErrorPdf(null);
+    setPagina(1);
+
+    const cargarDoc = async (rol: 'A' | 'B', cacheKey: string) => {
+      const res = await apiFetch(`/api/comparador/pdf/${rol}?v=${encodeURIComponent(cacheKey)}`);
+      if (!res.ok) {
+        throw new Error(`No se pudo cargar el PDF visual del Plano ${rol}.`);
+      }
+      const buf = await res.arrayBuffer();
+      const task = pdfjsLib.getDocument({ data: new Uint8Array(buf) });
+      return await task.promise;
+    };
+
+    (async () => {
+      try {
+        const docA = await cargarDoc('A', `${planoA.id}_${planoA.fechaSubida}`);
+        const docB = planoB ? await cargarDoc('B', `${planoB.id}_${planoB.fechaSubida}`) : null;
+        if (cancelado) {
+          await docA?.destroy?.();
+          await docB?.destroy?.();
+          return;
+        }
+        await docARef.current?.destroy?.();
+        await docBRef.current?.destroy?.();
+        docARef.current = docA;
+        docBRef.current = docB;
+        setTotalPaginas(Math.max(docA?.numPages || 1, docB?.numPages || 1));
+      } catch (err: any) {
+        if (!cancelado) {
+          setErrorPdf(err?.message || 'Error cargando visor PDF.');
+        }
+      } finally {
+        if (!cancelado) setCargando(false);
+      }
+    })();
+
+    return () => {
+      cancelado = true;
+    };
+  }, [planoA.id, planoA.fechaSubida, planoB?.id, planoB?.fechaSubida]);
+
+  useEffect(() => {
+    if (!abierto) return;
+    let cancelado = false;
+
+    const dibujar = async () => {
+      const docA = docARef.current;
+      const docB = docBRef.current;
+      if (!docA) return;
+      setCargando(true);
+      try {
+        const offA = await renderPdfPageToCanvas(docA, pagina, zoom);
+        const offB = docB ? await renderPdfPageToCanvas(docB, pagina, zoom) : null;
+        if (cancelado) return;
+
+        if (modo === 'lado_a_lado') {
+          if (canvasSideARef.current) {
+            canvasSideARef.current.width = offA.width;
+            canvasSideARef.current.height = offA.height;
+            canvasSideARef.current.getContext('2d')?.drawImage(offA, 0, 0);
+          }
+          if (offB && canvasSideBRef.current) {
+            canvasSideBRef.current.width = offB.width;
+            canvasSideBRef.current.height = offB.height;
+            canvasSideBRef.current.getContext('2d')?.drawImage(offB, 0, 0);
+          }
+          setRatioDiffPct(null);
+        } else if (modo === 'superposicion' && canvasOverlayRef.current) {
+          const w = Math.max(offA.width, offB?.width || 0);
+          const h = Math.max(offA.height, offB?.height || 0);
+          const dest = canvasOverlayRef.current;
+          dest.width = w;
+          dest.height = h;
+          const ctx = dest.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+
+            if (!offB) {
+              ctx.drawImage(offA, 0, 0);
+              setRatioDiffPct(null);
+            } else {
+              const ctxA = offA.getContext('2d');
+              const ctxB = offB.getContext('2d');
+              const dataA = ctxA?.getImageData(0, 0, offA.width, offA.height);
+              const dataB = ctxB?.getImageData(0, 0, offB.width, offB.height);
+              const outImg = ctx.createImageData(w, h);
+              const out = outImg.data;
+              let pixelesDistintos = 0;
+              const totalPix = w * h;
+
+              for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                  const dstIdx = (y * w + x) * 4;
+                  const bx = x - offsetX;
+                  const by = y - offsetY;
+
+                  let lumA = 255;
+                  if (dataA && x < offA.width && y < offA.height) {
+                    const idxA = (y * offA.width + x) * 4;
+                    lumA = (dataA.data[idxA] + dataA.data[idxA + 1] + dataA.data[idxA + 2]) / 3;
+                  }
+                  let lumB = 255;
+                  if (dataB && bx >= 0 && bx < offB.width && by >= 0 && by < offB.height) {
+                    const idxB = (by * offB.width + bx) * 4;
+                    lumB = (dataB.data[idxB] + dataB.data[idxB + 1] + dataB.data[idxB + 2]) / 3;
+                  }
+
+                  const inkA = lumA < 225;
+                  const inkB = lumB < 225;
+                  const diffVal = Math.abs(lumA - lumB);
+
+                  if (resaltarDiff && diffVal > 38) {
+                    pixelesDistintos++;
+                    if (inkA && !inkB) {
+                      // Solo en A -> Cian intenso
+                      out[dstIdx] = 14;
+                      out[dstIdx + 1] = 165;
+                      out[dstIdx + 2] = 233;
+                      out[dstIdx + 3] = 255;
+                    } else if (!inkA && inkB) {
+                      // Nuevo en B -> Rojo / Magenta fuerte
+                      out[dstIdx] = Math.round(239 * opacidadB + 255 * (1 - opacidadB));
+                      out[dstIdx + 1] = Math.round(68 * opacidadB + 255 * (1 - opacidadB));
+                      out[dstIdx + 2] = Math.round(132 * opacidadB + 255 * (1 - opacidadB));
+                      out[dstIdx + 3] = 255;
+                    } else {
+                      out[dstIdx] = 239;
+                      out[dstIdx + 1] = 68;
+                      out[dstIdx + 2] = 68;
+                      out[dstIdx + 3] = 255;
+                    }
+                  } else {
+                    const blended = Math.min(lumA, lumB * (1 - opacidadB) + 255 * (1 - (1 - opacidadB) * (1 - lumB / 255)));
+                    const v = Math.round(Math.max(0, Math.min(255, (lumA + lumB) / 2)));
+                    out[dstIdx] = v;
+                    out[dstIdx + 1] = v;
+                    out[dstIdx + 2] = Math.round(blended);
+                    out[dstIdx + 3] = 255;
+                  }
+                }
+              }
+              ctx.putImageData(outImg, 0, 0);
+              setRatioDiffPct(totalPix > 0 ? Number(((pixelesDistintos / totalPix) * 100).toFixed(2)) : 0);
+            }
+          }
+        } else if (modo === 'deslizador') {
+          if (canvasSplitARef.current) {
+            canvasSplitARef.current.width = offA.width;
+            canvasSplitARef.current.height = offA.height;
+            canvasSplitARef.current.getContext('2d')?.drawImage(offA, 0, 0);
+          }
+          if (offB && canvasSplitBRef.current) {
+            canvasSplitBRef.current.width = offA.width;
+            canvasSplitBRef.current.height = offA.height;
+            const ctxB = canvasSplitBRef.current.getContext('2d');
+            if (ctxB) {
+              ctxB.fillStyle = '#ffffff';
+              ctxB.fillRect(0, 0, offA.width, offA.height);
+              ctxB.drawImage(offB, offsetX, offsetY);
+            }
+          }
+          setRatioDiffPct(null);
+        }
+      } catch (err: any) {
+        if (!cancelado) setErrorPdf(err?.message || 'Error renderizando página PDF.');
+      } finally {
+        if (!cancelado) setCargando(false);
+      }
+    };
+
+    void dibujar();
+    return () => {
+      cancelado = true;
+    };
+  }, [abierto, modo, pagina, zoom, opacidadB, offsetX, offsetY, resaltarDiff, planoA.id, planoB?.id]);
+
+  return (
+    <div className="bento-card p-3 sm:p-4 space-y-3 border-sky-500/30 bg-slate-950/80">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <Eye className="w-4 h-4 text-sky-400 shrink-0" />
+          <div className="min-w-0">
+            <h4 className="text-xs font-bold text-white">
+              Visor Visual Interactivo de Planos PDF
+            </h4>
+            <p className="text-[10px] text-slate-400">
+              Inspecciona lado a lado, superpone trazos (<span className="text-sky-300">Cian = A</span> vs <span className="text-rose-300">Magenta = B</span>) o usa deslizador A/B
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setAbierto(v => !v)}
+          className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] text-slate-200 font-semibold cursor-pointer"
+        >
+          {abierto ? 'Contraer visor' : 'Abrir visor visual'}
+        </button>
+      </div>
+
+      {abierto && (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800 text-[11px]">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setModo('lado_a_lado')}
+                className={`px-2.5 py-1 rounded-lg border font-semibold inline-flex items-center gap-1 cursor-pointer ${
+                  modo === 'lado_a_lado'
+                    ? 'bg-sky-600/25 border-sky-400/60 text-sky-200'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                <Columns2 className="w-3.5 h-3.5" />
+                <span>Lado a Lado</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setModo('superposicion')}
+                disabled={!planoB}
+                className={`px-2.5 py-1 rounded-lg border font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-40 ${
+                  modo === 'superposicion'
+                    ? 'bg-sky-600/25 border-sky-400/60 text-sky-200'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>Superposición + Diff</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setModo('deslizador')}
+                disabled={!planoB}
+                className={`px-2.5 py-1 rounded-lg border font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-40 ${
+                  modo === 'deslizador'
+                    ? 'bg-sky-600/25 border-sky-400/60 text-sky-200'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                <SplitSquareHorizontal className="w-3.5 h-3.5" />
+                <span>Deslizador A/B</span>
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 font-mono">
+              <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-lg px-1.5 py-0.5">
+                <button
+                  type="button"
+                  onClick={() => setPagina(p => Math.max(1, p - 1))}
+                  disabled={pagina <= 1}
+                  className="p-1 text-slate-300 hover:text-white disabled:opacity-30 cursor-pointer"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <span className="text-[10px] text-slate-200 px-1">
+                  Pág {pagina}/{totalPaginas}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPagina(p => Math.min(totalPaginas, p + 1))}
+                  disabled={pagina >= totalPaginas}
+                  className="p-1 text-slate-300 hover:text-white disabled:opacity-30 cursor-pointer"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <select
+                value={zoom}
+                onChange={e => setZoom(Number(e.target.value))}
+                className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-[10px] text-slate-200"
+                aria-label="Zoom de visor PDF"
+              >
+                <option value={0.6}>60%</option>
+                <option value={0.8}>80%</option>
+                <option value={1}>100%</option>
+                <option value={1.25}>125%</option>
+                <option value={1.5}>150%</option>
+                <option value={2}>200%</option>
+              </select>
+            </div>
+          </div>
+
+          {planoB && (modo === 'superposicion' || modo === 'deslizador') && (
+            <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-900/70 border border-slate-800 rounded-xl px-3 py-2 text-[10px]">
+              {modo === 'superposicion' ? (
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="flex items-center gap-1.5 text-slate-300">
+                    <span>Opacidad B:</span>
+                    <input
+                      type="range"
+                      min={0.2}
+                      max={1}
+                      step={0.05}
+                      value={opacidadB}
+                      onChange={e => setOpacidadB(Number(e.target.value))}
+                      className="w-20 accent-sky-500"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5 text-slate-200 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={resaltarDiff}
+                      onChange={e => setResaltarDiff(e.target.checked)}
+                      className="accent-rose-500"
+                    />
+                    <span>Resaltar diferencias</span>
+                  </label>
+                  {ratioDiffPct !== null && (
+                    <span className="font-mono text-amber-300">
+                      Δ píxeles: {ratioDiffPct}%
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <label className="flex items-center gap-2 text-slate-200 flex-1 min-w-[200px]">
+                  <span className="font-mono text-sky-300">A (0%)</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={splitPct}
+                    onChange={e => setSplitPct(Number(e.target.value))}
+                    className="flex-1 accent-sky-500"
+                  />
+                  <span className="font-mono text-rose-300">B ({splitPct}%)</span>
+                </label>
+              )}
+
+              <div className="flex items-center gap-1 font-mono text-slate-300">
+                <span>Alinear XY ({offsetX},{offsetY}):</span>
+                <button
+                  type="button"
+                  onClick={() => setOffsetX(x => x - 4)}
+                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 cursor-pointer"
+                >
+                  ←
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOffsetX(x => x + 4)}
+                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 cursor-pointer"
+                >
+                  →
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOffsetY(y => y - 4)}
+                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 cursor-pointer"
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOffsetY(y => y + 4)}
+                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 cursor-pointer"
+                >
+                  ↓
+                </button>
+                {(offsetX !== 0 || offsetY !== 0) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOffsetX(0);
+                      setOffsetY(0);
+                    }}
+                    className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 cursor-pointer"
+                    title="Reiniciar alineación"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {errorPdf && (
+            <div className="text-xs text-rose-300 bg-rose-950/30 border border-rose-700/40 rounded-lg px-3 py-2">
+              {errorPdf}
+            </div>
+          )}
+
+          <div className="relative rounded-xl border border-slate-800 bg-slate-900/60 p-2 overflow-auto max-h-[65vh]">
+            {cargando && (
+              <div className="flex items-center gap-2 text-xs text-sky-300 py-4 justify-center">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Renderizando plano PDF...</span>
+              </div>
+            )}
+
+            {modo === 'lado_a_lado' && (
+              <div className={`grid gap-3 ${planoB ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>
+                <div className="space-y-1">
+                  <div className="text-[10px] font-mono text-sky-300 font-bold truncate">
+                    PLANO A · {planoA.nombre}
+                  </div>
+                  <canvas ref={canvasSideARef} className="max-w-full h-auto rounded border border-slate-700 bg-white mx-auto" />
+                </div>
+                {planoB && (
+                  <div className="space-y-1">
+                    <div className="text-[10px] font-mono text-rose-300 font-bold truncate">
+                      PLANO B · {planoB.nombre}
+                    </div>
+                    <canvas ref={canvasSideBRef} className="max-w-full h-auto rounded border border-slate-700 bg-white mx-auto" />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {modo === 'superposicion' && (
+              <div className="flex flex-col items-center">
+                <canvas ref={canvasOverlayRef} className="max-w-full h-auto rounded border border-slate-700 bg-white" />
+              </div>
+            )}
+
+            {modo === 'deslizador' && planoB && (
+              <div className="relative inline-block max-w-full mx-auto overflow-hidden rounded border border-slate-700 bg-white">
+                <canvas ref={canvasSplitARef} className="max-w-full h-auto block" />
+                <div
+                  className="absolute inset-0 overflow-hidden pointer-events-none"
+                  style={{ clipPath: `inset(0 ${100 - splitPct}% 0 0)` }}
+                >
+                  <canvas ref={canvasSplitBRef} className="max-w-full h-auto block" />
+                </div>
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.9)] pointer-events-none"
+                  style={{ left: `${splitPct}%` }}
+                />
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
 
 const PRESETS_ENFOQUE = [
   {
@@ -372,6 +873,11 @@ export const ComparadorTab: React.FC = () => {
           onRemove={() => eliminarPlanoComparador('B')}
         />
       </div>
+
+      {/* Visor Visual Interactivo de Planos PDF */}
+      {planoCompararA && (
+        <VisorComparadorVisualPdf planoA={planoCompararA} planoB={planoCompararB} />
+      )}
 
       {/* Enfoque y botón de ejecución */}
       <div className="bento-card p-3 sm:p-4 space-y-3">

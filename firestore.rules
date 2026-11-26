@@ -390,13 +390,16 @@ service cloud.firestore {
           'id', 'workspaceId', 'ownerId', 'memberUids', 'nombre', 'fecha', 'dataUrl', 'analisisIA', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'id', 'workspaceId', 'ownerId', 'memberUids', 'nombre', 'fecha', 'dataUrl', 'analisisIA', 'createdAt', 'updatedAt'
+          'id', 'workspaceId', 'ownerId', 'memberUids', 'nombre', 'fecha', 'dataUrl', 'analisisIA',
+          'frente', 'interferenciaId', 'createdAt', 'updatedAt'
         ]) &&
         hasWorkspaceEnvelope(data, workspaceId) &&
         isStringBounded(data.nombre, 1, 200) &&
         isStringBounded(data.fecha, 0, 64) &&
         isStringBounded(data.dataUrl, 1, 450000) &&
-        isStringBounded(data.analisisIA, 0, 4000);
+        isStringBounded(data.analisisIA, 0, 4000) &&
+        (!('frente' in data) || isStringBounded(data.frente, 0, 120)) &&
+        (!('interferenciaId' in data) || isStringBounded(data.interferenciaId, 0, 128));
     }
 
     function isValidNotaAudio(data, workspaceId) {
@@ -488,12 +491,12 @@ service cloud.firestore {
 
     function isValidWorkspaceIAControl(data, workspaceId, docId) {
       return data.keys().hasAll([
-          'id', 'workspaceId', 'modelosPagosHabilitados',
+          'id', 'workspaceId', 'modelosPagosHabilitados', 'usuariosPagosAutorizados',
           'updatedByEmail', 'updatedByUid', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'id', 'workspaceId', 'modelosPagosHabilitados',
-          'updatedByEmail', 'updatedByUid', 'createdAt', 'updatedAt'
+          'id', 'workspaceId', 'modelosPagosHabilitados', 'usuariosPagosAutorizados',
+          'limitesPorUsuarioUsd', 'updatedByEmail', 'updatedByUid', 'createdAt', 'updatedAt'
         ]) &&
         docId == 'ia_control' &&
         isValidId(data.id) &&
@@ -501,6 +504,8 @@ service cloud.firestore {
         isValidId(data.workspaceId) &&
         data.workspaceId == workspaceId &&
         data.modelosPagosHabilitados is bool &&
+        isStringListBounded(data.usuariosPagosAutorizados, 50) &&
+        (!('limitesPorUsuarioUsd' in data) || (data.limitesPorUsuarioUsd is map && data.limitesPorUsuarioUsd.size() <= 50)) &&
         isStringBounded(data.updatedByEmail, 3, 200) &&
         isStringBounded(data.updatedByUid, 1, 128) &&
         data.updatedByUid == request.auth.uid &&
@@ -891,7 +896,7 @@ service cloud.firestore {
           isValidFotoCampo(incoming(), workspaceId) &&
           isWorkspaceMember(workspaceId) &&
           immutableEnvelopePreserved() &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'nombre', 'fecha', 'dataUrl', 'analisisIA', 'updatedAt']);
+          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'nombre', 'fecha', 'dataUrl', 'analisisIA', 'frente', 'interferenciaId', 'updatedAt']);
         allow delete: if isValidId(workspaceId) && isValidId(fotoId) && isWorkspaceMember(workspaceId);
       }
 
@@ -992,7 +997,7 @@ service cloud.firestore {
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'modelosPagosHabilitados', 'updatedByEmail', 'updatedByUid', 'updatedAt'
+            'modelosPagosHabilitados', 'usuariosPagosAutorizados', 'limitesPorUsuarioUsd', 'updatedByEmail', 'updatedByUid', 'updatedAt'
           ]);
         allow delete: if isValidId(workspaceId) && isValidId(docId) && docId == 'ia_control' && isBootstrappedAdmin();
       }

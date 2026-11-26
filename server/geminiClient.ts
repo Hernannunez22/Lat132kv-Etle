@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   GoogleGenAI,
   ThinkingLevel,
@@ -11,6 +12,7 @@ import type {
   GeminiModeloId,
   GeminiModelCatalogItem,
   GeminiPrecisionState,
+  GeminiUserUsageSummary,
   PoliticaLimiteModelo,
   PrecisionNivelId,
   ProveedorIAModelo,
@@ -19,6 +21,7 @@ import {
   DEFAULT_OPENROUTER_FREE_MODEL,
   generarChatOpenRouter,
   getModelosGratuitosOpenRouterCache,
+  getOpenRouterSalud,
   tieneOpenRouterConfigurado,
 } from './openRouterClient.js';
 
@@ -128,15 +131,82 @@ interface PersistedModelLimitAndUsage {
   historicoCostoUsd: number;
 }
 
-const PRECISION_STORE_SCHEMA_VERSION = 3;
+const PRECISION_STORE_SCHEMA_VERSION = 4;
+
+interface PersistedUserUsageToday {
+  fecha: string;
+  consultas: number;
+  inputTokens: number;
+  outputTokens: number;
+  costoUsd: number;
+}
 
 interface PersistedPrecisionStore {
   schemaVersion?: number;
   modelosPagosHabilitados: boolean;
+  usuariosPagosAutorizados: string[];
+  limitesPorUsuarioUsd: Record<string, number>;
+  usoPorUsuarioHoy: Record<string, PersistedUserUsageToday>;
   nivelPreferido: PrecisionNivelId;
   politicaLimite: PoliticaLimiteModelo;
   openRouterModeloPreferido: string;
   modelos: Record<GeminiModeloId, PersistedModelLimitAndUsage>;
+}
+
+export interface AiRequestContext {
+  allowPagos: boolean;
+  userEmail?: string;
+  esMaestro: boolean;
+}
+
+const aiRequestContextStorage = new AsyncLocalStorage<AiRequestContext>();
+
+export function runWithAiRequestContext<T>(ctx: AiRequestContext, fn: () => T): T {
+  return aiRequestContextStorage.run(ctx, fn);
+}
+
+export function normalizarEmailsAutorizados(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const clean = item.trim().toLowerCase();
+    if (
+      !clean ||
+      clean.length < 3 ||
+      clean.length > 200 ||
+      !clean.includes('@') ||
+      !clean.includes('.')
+    ) {
+      continue;
+    }
+    seen.add(clean);
+    if (seen.size >= 50) break;
+  }
+  return Array.from(seen).sort();
+}
+
+export function normalizarLimitesPorUsuarioUsd(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    const clean = String(key || '').trim().toLowerCase();
+    if (
+      !clean ||
+      clean.length < 3 ||
+      clean.length > 200 ||
+      !clean.includes('@') ||
+      !clean.includes('.')
+    ) {
+      continue;
+    }
+    const num = Number(val);
+    if (Number.isFinite(num) && num >= 0) {
+      out[clean] = Math.min(1000, Number(num.toFixed(4)));
+    }
+    if (Object.keys(out).length >= 50) break;
+  }
+  return out;
 }
 
 function getHoyISO(): string {
@@ -166,11 +236,30 @@ function crearEstadoInicialModelo(def: PrecisionCatalogDef, hoy: string): Persis
 function normalizarStorePrecision(raw?: any): PersistedPrecisionStore {
   const hoy = getHoyISO();
   const schemaPrev = raw && typeof raw === 'object' ? Number(raw.schemaVersion || 1) : 0;
-  const esMigracionPreV3 = schemaPrev > 0 && schemaPrev < PRECISION_STORE_SCHEMA_VERSION;
+  const esMigracionPreV3 = schemaPrev > 0 && schemaPrev < 3;
   const modelosPagosHabilitados =
     !esMigracionPreV3 && raw && typeof raw === 'object' && typeof raw.modelosPagosHabilitados === 'boolean'
       ? raw.modelosPagosHabilitados
       : false;
+  const usuariosPagosAutorizados = !esMigracionPreV3
+    ? normalizarEmailsAutorizados(raw?.usuariosPagosAutorizados)
+    : [];
+  const limitesPorUsuarioUsd = normalizarLimitesPorUsuarioUsd(raw?.limitesPorUsuarioUsd);
+
+  const usoPorUsuarioHoy: Record<string, PersistedUserUsageToday> = {};
+  if (raw?.usoPorUsuarioHoy && typeof raw.usoPorUsuarioHoy === 'object' && !Array.isArray(raw.usoPorUsuarioHoy)) {
+    for (const [emailKey, stRaw] of Object.entries(raw.usoPorUsuarioHoy as Record<string, any>)) {
+      const clean = String(emailKey || '').trim().toLowerCase();
+      if (!clean || !clean.includes('@') || !stRaw || stRaw.fecha !== hoy) continue;
+      usoPorUsuarioHoy[clean] = {
+        fecha: hoy,
+        consultas: Math.max(0, Math.round(Number(stRaw.consultas || 0))),
+        inputTokens: Math.max(0, Math.round(Number(stRaw.inputTokens || 0))),
+        outputTokens: Math.max(0, Math.round(Number(stRaw.outputTokens || 0))),
+        costoUsd: Math.max(0, Number(Number(stRaw.costoUsd || 0).toFixed(6))),
+      };
+    }
+  }
 
   let nivelValido: PrecisionNivelId =
     raw?.nivelPreferido === 'gratuito' ||
@@ -230,6 +319,9 @@ function normalizarStorePrecision(raw?: any): PersistedPrecisionStore {
   return {
     schemaVersion: PRECISION_STORE_SCHEMA_VERSION,
     modelosPagosHabilitados,
+    usuariosPagosAutorizados,
+    limitesPorUsuarioUsd,
+    usoPorUsuarioHoy,
     nivelPreferido: nivelValido,
     politicaLimite: politicaValida,
     openRouterModeloPreferido,
@@ -281,13 +373,21 @@ function asegurarFechaHoyStore() {
       changed = true;
     }
   }
+  for (const emailKey of Object.keys(precisionStore.usoPorUsuarioHoy)) {
+    if (precisionStore.usoPorUsuarioHoy[emailKey].fecha !== hoy) {
+      delete precisionStore.usoPorUsuarioHoy[emailKey];
+      changed = true;
+    }
+  }
   if (changed) guardarStorePrecisionEnDisco(precisionStore);
 }
 
 export function getCatalogDefByNivelOrModel(
-  nivelOrModel?: string
+  nivelOrModel?: string,
+  allowPaidOverride?: boolean
 ): PrecisionCatalogDef {
-  if (!precisionStore.modelosPagosHabilitados) {
+  const allowPaid = allowPaidOverride ?? isModelosPagosHabilitados();
+  if (!allowPaid) {
     return GEMINI_PRECISION_CATALOG.gratuito;
   }
   if (
@@ -313,38 +413,186 @@ export function getOpenRouterModeloPreferido(): string {
   return precisionStore.openRouterModeloPreferido || DEFAULT_OPENROUTER_FREE_MODEL;
 }
 
-export function isModelosPagosHabilitados(): boolean {
+export function isGlobalModelosPagosHabilitados(): boolean {
   return Boolean(precisionStore.modelosPagosHabilitados);
 }
 
-export function setModelosPagosHabilitados(
-  habilitado: boolean,
-  options?: { esMaestro?: boolean }
+export function getUsuariosPagosAutorizados(): string[] {
+  return [...precisionStore.usuariosPagosAutorizados];
+}
+
+export function isEmailAutorizadoParaPagos(
+  email?: string | null,
+  emailVerified?: boolean
+): boolean {
+  if (!precisionStore.modelosPagosHabilitados) return false;
+  if (!emailVerified || !email || typeof email !== 'string') return false;
+  const clean = email.trim().toLowerCase();
+  return precisionStore.usuariosPagosAutorizados.includes(clean);
+}
+
+export function isModelosPagosHabilitados(): boolean {
+  const ctx = aiRequestContextStorage.getStore();
+  if (!ctx) return false;
+  return Boolean(ctx.allowPagos && precisionStore.modelosPagosHabilitados);
+}
+
+const FIRESTORE_IA_CONTROL_REST_URL =
+  'https://firestore.googleapis.com/v1/projects/gen-lang-client-0070217603/databases/ai-studio-lat132kvetle-850cadb2-8b67-4bf7-95f5-01af5da2b604/documents/workspaces/obra-132kv-principal/config/ia_control';
+let lastFirestoreSyncAt = 0;
+let lastMasterWriteAt = 0;
+
+export async function syncIAControlDesdeFirestoreRest(idToken?: string): Promise<void> {
+  if (!idToken) return;
+  const now = Date.now();
+  if (now - lastMasterWriteAt < 8000 || now - lastFirestoreSyncAt < 10000) {
+    return;
+  }
+  lastFirestoreSyncAt = now;
+  try {
+    const res = await fetch(FIRESTORE_IA_CONTROL_REST_URL, {
+      headers: { Authorization: `Bearer ${idToken}` },
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!res.ok) return;
+    const json = (await res.json()) as {
+      fields?: {
+        modelosPagosHabilitados?: { booleanValue?: boolean };
+        usuariosPagosAutorizados?: {
+          arrayValue?: { values?: Array<{ stringValue?: string }> };
+        };
+        limitesPorUsuarioUsd?: {
+          mapValue?: {
+            fields?: Record<string, { doubleValue?: number; integerValue?: string | number }>;
+          };
+        };
+      };
+    };
+    const nextEnabled = Boolean(json.fields?.modelosPagosHabilitados?.booleanValue);
+    const rawEmails = (json.fields?.usuariosPagosAutorizados?.arrayValue?.values || [])
+      .map(v => v?.stringValue)
+      .filter((s): s is string => typeof s === 'string');
+    const nextUsers = normalizarEmailsAutorizados(rawEmails);
+
+    const rawLimitsMap: Record<string, number> = {};
+    const limitFields = json.fields?.limitesPorUsuarioUsd?.mapValue?.fields;
+    if (limitFields && typeof limitFields === 'object') {
+      for (const [k, v] of Object.entries(limitFields)) {
+        const val =
+          typeof v?.doubleValue === 'number'
+            ? v.doubleValue
+            : v?.integerValue !== undefined
+              ? Number(v.integerValue)
+              : NaN;
+        if (Number.isFinite(val)) {
+          rawLimitsMap[k] = val;
+        }
+      }
+    }
+    const nextLimits = normalizarLimitesPorUsuarioUsd(rawLimitsMap);
+
+    const changed =
+      nextEnabled !== precisionStore.modelosPagosHabilitados ||
+      JSON.stringify(nextUsers) !== JSON.stringify(precisionStore.usuariosPagosAutorizados) ||
+      JSON.stringify(nextLimits) !== JSON.stringify(precisionStore.limitesPorUsuarioUsd);
+
+    if (changed) {
+      precisionStore.modelosPagosHabilitados = nextEnabled;
+      precisionStore.usuariosPagosAutorizados = nextUsers;
+      precisionStore.limitesPorUsuarioUsd = nextLimits;
+      if (!nextEnabled) {
+        precisionStore.nivelPreferido = 'gratuito';
+        preferredModelState = OPENROUTER_FREE_MODEL;
+      }
+      guardarStorePrecisionEnDisco(precisionStore);
+    }
+  } catch {
+    // Silencioso: ante falla de red conserva estado persistido seguro en disco
+  }
+}
+
+export function updateMasterControlIA(
+  payload: {
+    modelosPagosHabilitados?: boolean;
+    usuariosPagosAutorizados?: string[];
+    limitesPorUsuarioUsd?: Record<string, number>;
+  },
+  options?: { esMaestro?: boolean; userEmail?: string | null; emailVerified?: boolean }
 ): GeminiPrecisionState {
   asegurarFechaHoyStore();
-  precisionStore.modelosPagosHabilitados = Boolean(habilitado);
+  lastMasterWriteAt = Date.now();
+  lastFirestoreSyncAt = Date.now();
+
+  if (Array.isArray(payload.usuariosPagosAutorizados)) {
+    precisionStore.usuariosPagosAutorizados = normalizarEmailsAutorizados(
+      payload.usuariosPagosAutorizados
+    );
+  }
+
+  if (
+    payload.limitesPorUsuarioUsd &&
+    typeof payload.limitesPorUsuarioUsd === 'object' &&
+    !Array.isArray(payload.limitesPorUsuarioUsd)
+  ) {
+    precisionStore.limitesPorUsuarioUsd = normalizarLimitesPorUsuarioUsd(
+      payload.limitesPorUsuarioUsd
+    );
+  }
+
+  if (typeof payload.modelosPagosHabilitados === 'boolean') {
+    precisionStore.modelosPagosHabilitados = payload.modelosPagosHabilitados;
+    if (
+      payload.modelosPagosHabilitados &&
+      !Array.isArray(payload.usuariosPagosAutorizados) &&
+      precisionStore.usuariosPagosAutorizados.length === 0
+    ) {
+      precisionStore.usuariosPagosAutorizados = [MASTER_ADMIN_EMAIL];
+    }
+  }
+
   if (!precisionStore.modelosPagosHabilitados) {
     precisionStore.nivelPreferido = 'gratuito';
     preferredModelState = OPENROUTER_FREE_MODEL;
   } else {
     preferredModelState = GEMINI_PRECISION_CATALOG[precisionStore.nivelPreferido].modelo;
   }
+
   guardarStorePrecisionEnDisco(precisionStore);
-  return getGeminiPrecisionState({ esMaestro: options?.esMaestro ?? true });
+  return getGeminiPrecisionState({
+    esMaestro: options?.esMaestro ?? true,
+    userEmail: options?.userEmail ?? MASTER_ADMIN_EMAIL,
+    emailVerified: options?.emailVerified ?? true,
+  });
 }
 
-export function getGeminiPrecisionState(options?: { esMaestro?: boolean }): GeminiPrecisionState {
+export function setModelosPagosHabilitados(
+  habilitado: boolean,
+  options?: { esMaestro?: boolean; userEmail?: string | null; emailVerified?: boolean }
+): GeminiPrecisionState {
+  return updateMasterControlIA({ modelosPagosHabilitados: Boolean(habilitado) }, options);
+}
+
+export function getGeminiPrecisionState(options?: {
+  esMaestro?: boolean;
+  userEmail?: string | null;
+  emailVerified?: boolean;
+}): GeminiPrecisionState {
   asegurarFechaHoyStore();
   const hoy = getHoyISO();
-  const pagosHabilitados = Boolean(precisionStore.modelosPagosHabilitados);
+  const globalPagosHabilitados = Boolean(precisionStore.modelosPagosHabilitados);
   const esMaestro = Boolean(options?.esMaestro);
+  const puedeUsarPagos = isEmailAutorizadoParaPagos(options?.userEmail, options?.emailVerified);
+  const emailNorm =
+    typeof options?.userEmail === 'string' && options.userEmail.includes('@')
+      ? options.userEmail.trim().toLowerCase()
+      : '';
   let costoTotalHoyUsd = 0;
   let consultasTotalesHoy = 0;
   let costoHistoricoUsd = 0;
-  const geminiConfigurado = pagosHabilitados ? obtenerCandidatosApiKeys().length > 0 : false;
+  const geminiConfigurado = puedeUsarPagos ? obtenerCandidatosApiKeys().length > 0 : false;
   const openRouterConfigurado = tieneOpenRouterConfigurado();
 
-  const nivelesVisibles: PrecisionNivelId[] = pagosHabilitados
+  const nivelesVisibles: PrecisionNivelId[] = puedeUsarPagos
     ? ['gratuito', 'economico', 'balanceado', 'alta']
     : ['gratuito'];
 
@@ -383,7 +631,36 @@ export function getGeminiPrecisionState(options?: { esMaestro?: boolean }): Gemi
     };
   });
 
-  const nivelEfectivo: PrecisionNivelId = pagosHabilitados
+  let usoPorUsuarioHoy: GeminiUserUsageSummary[] | undefined;
+  if (esMaestro) {
+    const emailsSet = new Set<string>([
+      MASTER_ADMIN_EMAIL.toLowerCase(),
+      ...precisionStore.usuariosPagosAutorizados,
+      ...Object.keys(precisionStore.limitesPorUsuarioUsd),
+      ...Object.keys(precisionStore.usoPorUsuarioHoy),
+    ]);
+    usoPorUsuarioHoy = Array.from(emailsSet)
+      .map(em => {
+        const u = precisionStore.usoPorUsuarioHoy[em];
+        return {
+          email: em,
+          consultas: u?.consultas || 0,
+          inputTokens: u?.inputTokens || 0,
+          outputTokens: u?.outputTokens || 0,
+          costoUsd: Number((u?.costoUsd || 0).toFixed(6)),
+          limiteUsd: Number((precisionStore.limitesPorUsuarioUsd[em] || 0).toFixed(4)),
+        };
+      })
+      .sort((a, b) => b.costoUsd - a.costoUsd || a.email.localeCompare(b.email));
+  }
+
+  const miUso = emailNorm ? precisionStore.usoPorUsuarioHoy[emailNorm] : undefined;
+  const miLimiteDiarioUsd = emailNorm
+    ? Number((precisionStore.limitesPorUsuarioUsd[emailNorm] || 0).toFixed(4))
+    : undefined;
+  const miConsumoHoyUsd = emailNorm ? Number((miUso?.costoUsd || 0).toFixed(6)) : undefined;
+
+  const nivelEfectivo: PrecisionNivelId = puedeUsarPagos
     ? precisionStore.nivelPreferido
     : 'gratuito';
   const defPref = GEMINI_PRECISION_CATALOG[nivelEfectivo];
@@ -392,7 +669,16 @@ export function getGeminiPrecisionState(options?: { esMaestro?: boolean }): Gemi
     nivelPreferido: nivelEfectivo,
     modeloPreferido: defPref.modelo,
     politicaLimite: precisionStore.politicaLimite,
-    modelosPagosHabilitados: pagosHabilitados,
+    modelosPagosHabilitados: globalPagosHabilitados,
+    puedeUsarModelosPagos: puedeUsarPagos,
+    ...(esMaestro
+      ? {
+          usuariosPagosAutorizados: [...precisionStore.usuariosPagosAutorizados],
+          limitesPorUsuarioUsd: { ...precisionStore.limitesPorUsuarioUsd },
+          usoPorUsuarioHoy,
+        }
+      : {}),
+    ...(emailNorm ? { miConsumoHoyUsd, miLimiteDiarioUsd } : {}),
     esUsuarioMaestro: esMaestro,
     costoTotalHoyUsd: Number(costoTotalHoyUsd.toFixed(6)),
     consultasTotalesHoy,
@@ -400,6 +686,7 @@ export function getGeminiPrecisionState(options?: { esMaestro?: boolean }): Gemi
     openRouterConfigurado,
     openRouterModeloPreferido: getOpenRouterModeloPreferido(),
     openRouterModelosGratuitos: getModelosGratuitosOpenRouterCache(),
+    openRouterSalud: getOpenRouterSalud(),
     modelos,
   };
 }
@@ -415,12 +702,12 @@ export function updateGeminiPrecisionConfig(
       { maxConsultasDiarias?: number; maxCostoUsdDiario?: number }
     >;
   },
-  options?: { esMaestro?: boolean }
+  options?: { esMaestro?: boolean; userEmail?: string | null; emailVerified?: boolean }
 ): GeminiPrecisionState {
   asegurarFechaHoyStore();
-  const pagosHabilitados = Boolean(precisionStore.modelosPagosHabilitados);
+  const puedeUsarPagos = isEmailAutorizadoParaPagos(options?.userEmail, options?.emailVerified);
 
-  if (!pagosHabilitados) {
+  if (!puedeUsarPagos) {
     precisionStore.nivelPreferido = 'gratuito';
   } else if (
     payload.nivelPreferido === 'gratuito' ||
@@ -450,16 +737,16 @@ export function updateGeminiPrecisionConfig(
 
   preferredModelState = GEMINI_PRECISION_CATALOG[precisionStore.nivelPreferido].modelo;
 
-  if (payload.politicaLimite === 'bloquear' || payload.politicaLimite === 'fallback_economico') {
+  if (puedeUsarPagos && (payload.politicaLimite === 'bloquear' || payload.politicaLimite === 'fallback_economico')) {
     precisionStore.politicaLimite = payload.politicaLimite;
   }
 
   if (payload.limitesPorModelo && typeof payload.limitesPorModelo === 'object') {
     for (const [key, cfg] of Object.entries(payload.limitesPorModelo)) {
-      if (!pagosHabilitados && key !== 'gratuito' && key !== OPENROUTER_FREE_MODEL && !key.endsWith(':free')) {
+      if (!puedeUsarPagos && key !== 'gratuito' && key !== OPENROUTER_FREE_MODEL && !key.endsWith(':free')) {
         continue;
       }
-      const def = getCatalogDefByNivelOrModel(key);
+      const def = getCatalogDefByNivelOrModel(key, puedeUsarPagos);
       const entry = precisionStore.modelos[def.modelo];
       if (!entry || !cfg || typeof cfg !== 'object') continue;
       if (typeof cfg.maxConsultasDiarias === 'number' && Number.isFinite(cfg.maxConsultasDiarias) && cfg.maxConsultasDiarias >= 0) {
@@ -472,15 +759,16 @@ export function updateGeminiPrecisionConfig(
   }
 
   guardarStorePrecisionEnDisco(precisionStore);
-  return getGeminiPrecisionState({ esMaestro: options?.esMaestro });
+  return getGeminiPrecisionState(options);
 }
 
 export function resetGeminiUsoDiario(
   modelo?: string,
-  options?: { esMaestro?: boolean }
+  options?: { esMaestro?: boolean; userEmail?: string | null; emailVerified?: boolean }
 ): GeminiPrecisionState {
   const hoy = getHoyISO();
-  const targets: GeminiModeloId[] = !precisionStore.modelosPagosHabilitados
+  const puedeUsarPagos = isEmailAutorizadoParaPagos(options?.userEmail, options?.emailVerified);
+  const targets: GeminiModeloId[] = !puedeUsarPagos
     ? [OPENROUTER_FREE_MODEL]
     : modelo && precisionStore.modelos[modelo as GeminiModeloId]
       ? [modelo as GeminiModeloId]
@@ -495,8 +783,11 @@ export function resetGeminiUsoDiario(
       costoUsd: 0,
     };
   }
+  if (options?.esMaestro && !modelo) {
+    precisionStore.usoPorUsuarioHoy = {};
+  }
   guardarStorePrecisionEnDisco(precisionStore);
-  return getGeminiPrecisionState({ esMaestro: options?.esMaestro });
+  return getGeminiPrecisionState(options);
 }
 
 export function resolverEjecucionPrecision(params?: {
@@ -515,7 +806,7 @@ export function resolverEjecucionPrecision(params?: {
       motivoLimite: string;
     } {
   asegurarFechaHoyStore();
-  if (!precisionStore.modelosPagosHabilitados) {
+  if (!isModelosPagosHabilitados()) {
     const freeDef = GEMINI_PRECISION_CATALOG.gratuito;
     const entryFree = precisionStore.modelos[freeDef.modelo];
     const exFree =
@@ -536,6 +827,21 @@ export function resolverEjecucionPrecision(params?: {
   const solicitadoDef = getCatalogDefByNivelOrModel(
     params?.nivelSolicitado || params?.modeloSolicitado
   );
+
+  // Verificar cuota diaria individual en USD del usuario si tiene tope asignado por el maestro
+  const reqCtx = aiRequestContextStorage.getStore();
+  const emailReq = reqCtx?.userEmail?.trim().toLowerCase() || '';
+  if (emailReq && solicitadoDef.proveedor !== 'openrouter') {
+    const limitePersonalUsd = precisionStore.limitesPorUsuarioUsd[emailReq] || 0;
+    const usoPersonalUsd = precisionStore.usoPorUsuarioHoy[emailReq]?.costoUsd || 0;
+    if (limitePersonalUsd > 0 && usoPersonalUsd >= limitePersonalUsd) {
+      return {
+        permitido: false,
+        def: solicitadoDef,
+        motivoLimite: `Alcanzaste tu cuota diaria individual ($${usoPersonalUsd.toFixed(4)} / $${limitePersonalUsd.toFixed(2)} USD hoy para ${emailReq}). Cambia a "Gratuito · $0" o solicita ampliar tu cuota al administrador maestro.`,
+      };
+    }
+  }
 
   const checkModeloDisponible = (def: PrecisionCatalogDef) => {
     const entry = precisionStore.modelos[def.modelo];
@@ -658,6 +964,7 @@ export function registrarConsumoGemini(params: {
           ).toFixed(6)
         );
 
+  const emailReq = aiRequestContextStorage.getStore()?.userEmail?.trim().toLowerCase() || '';
   if (entry) {
     entry.usoHoy.consultas += 1;
     entry.usoHoy.inputTokens += inputTokens;
@@ -665,6 +972,23 @@ export function registrarConsumoGemini(params: {
     entry.usoHoy.costoUsd = Number((entry.usoHoy.costoUsd + costoUsd).toFixed(6));
     entry.historicoConsultas += 1;
     entry.historicoCostoUsd = Number((entry.historicoCostoUsd + costoUsd).toFixed(6));
+  }
+
+  if (emailReq) {
+    const hoy = getHoyISO();
+    const prevUser = precisionStore.usoPorUsuarioHoy[emailReq];
+    const baseUser: PersistedUserUsageToday =
+      prevUser && prevUser.fecha === hoy
+        ? prevUser
+        : { fecha: hoy, consultas: 0, inputTokens: 0, outputTokens: 0, costoUsd: 0 };
+    baseUser.consultas += 1;
+    baseUser.inputTokens += inputTokens;
+    baseUser.outputTokens += outputTokens;
+    baseUser.costoUsd = Number((baseUser.costoUsd + costoUsd).toFixed(6));
+    precisionStore.usoPorUsuarioHoy[emailReq] = baseUser;
+  }
+
+  if (entry || emailReq) {
     guardarStorePrecisionEnDisco(precisionStore);
   }
 
@@ -708,25 +1032,36 @@ export function getPreferredGeminiModel(): ModeloPreferido {
   return preferredModelState;
 }
 
-export function getLastWorkingGeminiInfo(options?: { esMaestro?: boolean }) {
+export function getLastWorkingGeminiInfo(options?: {
+  esMaestro?: boolean;
+  userEmail?: string | null;
+  emailVerified?: boolean;
+}) {
   const precision = getGeminiPrecisionState(options);
-  const pagosHabilitados = precision.modelosPagosHabilitados;
+  const puedeUsarPagos = Boolean(precision.puedeUsarModelosPagos);
   return {
-    modelo: pagosHabilitados ? lastWorkingModel || precision.modeloPreferido : OPENROUTER_FREE_MODEL,
-    fuenteClave: pagosHabilitados ? lastWorkingKeySource : 'OPENROUTER_FREE',
-    ultimoError: pagosHabilitados ? ultimoErrorGeminiGlobal : null,
+    modelo: puedeUsarPagos ? lastWorkingModel || precision.modeloPreferido : OPENROUTER_FREE_MODEL,
+    fuenteClave: puedeUsarPagos ? lastWorkingKeySource : 'OPENROUTER_FREE',
+    ultimoError: puedeUsarPagos ? ultimoErrorGeminiGlobal : null,
     modeloPreferido: precision.modeloPreferido,
     nivelPreferido: precision.nivelPreferido,
     politicaLimite: precision.politicaLimite,
     modelosPagosHabilitados: precision.modelosPagosHabilitados,
+    puedeUsarModelosPagos: puedeUsarPagos,
+    ...(precision.usuariosPagosAutorizados ? { usuariosPagosAutorizados: precision.usuariosPagosAutorizados } : {}),
+    ...(precision.limitesPorUsuarioUsd ? { limitesPorUsuarioUsd: precision.limitesPorUsuarioUsd } : {}),
+    ...(precision.usoPorUsuarioHoy ? { usoPorUsuarioHoy: precision.usoPorUsuarioHoy } : {}),
+    ...(precision.miConsumoHoyUsd !== undefined ? { miConsumoHoyUsd: precision.miConsumoHoyUsd } : {}),
+    ...(precision.miLimiteDiarioUsd !== undefined ? { miLimiteDiarioUsd: precision.miLimiteDiarioUsd } : {}),
+    openRouterSalud: precision.openRouterSalud,
     esUsuarioMaestro: precision.esUsuarioMaestro,
     costoTotalHoyUsd: precision.costoTotalHoyUsd,
     consultasTotalesHoy: precision.consultasTotalesHoy,
     costoHistoricoUsd: precision.costoHistoricoUsd,
     modelos: precision.modelos,
     precisionState: precision,
-    modelosTextoDisponibles: pagosHabilitados ? [...DEFAULT_TEXT_MODELS] : [OPENROUTER_FREE_MODEL],
-    modelosAudioDisponibles: pagosHabilitados ? [...DEFAULT_AUDIO_MODELS] : ['groq:whisper-large-v3-turbo'],
+    modelosTextoDisponibles: puedeUsarPagos ? [...DEFAULT_TEXT_MODELS] : [OPENROUTER_FREE_MODEL],
+    modelosAudioDisponibles: puedeUsarPagos ? [...DEFAULT_AUDIO_MODELS] : ['groq:whisper-large-v3-turbo'],
   };
 }
 
@@ -1193,7 +1528,7 @@ export async function generarContenidoConFallback(params: {
   keySourceUsed: string;
   intentos: IntentoModeloResultado[];
 }> {
-  if (!precisionStore.modelosPagosHabilitados) {
+  if (!isModelosPagosHabilitados()) {
     const { parts, tieneBinarios } = extraerTextoDesdeContentsParaOpenRouter(params.contents);
     if (!tieneBinarios && !params.isAudio && parts.length > 0 && tieneOpenRouterConfigurado()) {
       const t0 = Date.now();
@@ -1362,7 +1697,7 @@ export async function generarStreamConFallback(params: {
   keySourceUsed: string;
   intentos: IntentoModeloResultado[];
 }> {
-  if (!precisionStore.modelosPagosHabilitados) {
+  if (!isModelosPagosHabilitados()) {
     const disabledErr: any = new Error(
       'PAID_MODELS_DISABLED: Los modelos pagos están desactivados por el administrador maestro; solo el motor gratuito está habilitado.'
     );

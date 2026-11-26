@@ -1,18 +1,19 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { apiFetch, readJsonResponse } from '../utils/apiClient';
-import { 
-  Search, 
-  Mic, 
-  MicOff, 
-  Camera, 
-  Trash2, 
-  CheckCircle, 
-  FileText, 
+import { comprimirImagenCampo } from '../utils/imageFieldUtils';
+import {
+  Search,
+  Mic,
+  MicOff,
+  Camera,
+  Trash2,
+  CheckCircle,
+  FileText,
   Sparkles,
   Volume2,
   Loader2,
-  Plus
+  Plus,
 } from 'lucide-react';
 import { buscarYExtraerDePliegosReales } from '../data/pliegosContractuales';
 
@@ -23,53 +24,6 @@ interface FichaData {
   secuenciaInspeccion: string[];
   referencias?: string[];
   fuente?: string;
-}
-
-async function comprimirImagenCampo(file: File): Promise<string> {
-  const rawDataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = e => resolve(String(e.target?.result || ''));
-    reader.onerror = () => reject(new Error('Error leyendo imagen'));
-    reader.readAsDataURL(file);
-  });
-
-  return await new Promise<string>(resolve => {
-    const img = new Image();
-    img.onload = () => {
-      const MAX_DIM = 1280;
-      let width = img.naturalWidth || img.width;
-      let height = img.naturalHeight || img.height;
-      if (width > MAX_DIM || height > MAX_DIM) {
-        if (width >= height) {
-          height = Math.round((height * MAX_DIM) / width);
-          width = MAX_DIM;
-        } else {
-          width = Math.round((width * MAX_DIM) / height);
-          height = MAX_DIM;
-        }
-      }
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, width);
-      canvas.height = Math.max(1, height);
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        resolve(rawDataUrl);
-        return;
-      }
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-      for (const quality of [0.78, 0.65, 0.52, 0.4]) {
-        const out = canvas.toDataURL('image/jpeg', quality);
-        if (out.length <= 380000) {
-          resolve(out);
-          return;
-        }
-      }
-      resolve(canvas.toDataURL('image/jpeg', 0.35));
-    };
-    img.onerror = () => resolve(rawDataUrl);
-    img.src = rawDataUrl;
-  });
 }
 
 export const AnotadorTab: React.FC = () => {
@@ -86,6 +40,7 @@ export const AnotadorTab: React.FC = () => {
     deleteAudio,
     pliegosReales,
     planos,
+    interferencias,
     selectedFrenteFilter
   } = useApp();
 
@@ -95,6 +50,8 @@ export const AnotadorTab: React.FC = () => {
   const [isDictatingConsulta, setIsDictatingConsulta] = useState(false);
   const [isDictatingNota, setIsDictatingNota] = useState(false);
   const [isAnalyzingFoto, setIsAnalyzingFoto] = useState(false);
+  const [fotoFrenteDraft, setFotoFrenteDraft] = useState<string>('General');
+  const [fotoInterfDraft, setFotoInterfDraft] = useState<string>('');
   const [transcribingAudioId, setTranscribingAudioId] = useState<string | null>(null);
   const [estadoGuardadoNota, setEstadoGuardadoNota] = useState('Guardado automáticamente');
   const [bannerNotice, setBannerNotice] = useState<string | null>(null);
@@ -260,15 +217,23 @@ export const AnotadorTab: React.FC = () => {
     e.target.value = '';
 
     setIsAnalyzingFoto(true);
+    const interfSel = interferencias.find(i => i.id === fotoInterfDraft);
+    const frenteFinal = interfSel
+      ? interfSel.empresa
+      : fotoFrenteDraft && fotoFrenteDraft !== 'General'
+        ? fotoFrenteDraft
+        : undefined;
     try {
       for (const file of listaFiles) {
-        const compressedDataUrl = await comprimirImagenCampo(file);
+        const { dataUrl: compressedDataUrl } = await comprimirImagenCampo(file);
         const fotoId = 'foto_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
         addFoto({
           id: fotoId,
           nombre: file.name,
           fecha: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           dataUrl: compressedDataUrl,
+          ...(frenteFinal ? { frente: frenteFinal } : {}),
+          ...(interfSel ? { interferenciaId: interfSel.id } : {}),
         });
 
         try {
@@ -278,7 +243,12 @@ export const AnotadorTab: React.FC = () => {
             body: JSON.stringify({
               dataUrl: compressedDataUrl,
               nombre: file.name,
-              notaActual: notasCampo,
+              notaActual: [
+                frenteFinal ? `Frente/Cruce: ${frenteFinal}` : '',
+                notasCampo,
+              ]
+                .filter(Boolean)
+                .join(' · '),
             }),
           });
           const data = await readJsonResponse(res, 'Error analizando foto');
@@ -628,8 +598,35 @@ export const AnotadorTab: React.FC = () => {
             onChange={handlePhotoUpload}
           />
 
-          <div className="flex items-center gap-2">
-            <button 
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+            <select
+              value={fotoFrenteDraft}
+              onChange={e => setFotoFrenteDraft(e.target.value)}
+              className="bg-slate-950 border border-slate-700/80 rounded-xl px-2.5 py-2 text-[11px] text-slate-200 focus:outline-none focus:ring-1 focus:ring-sky-500"
+              aria-label="Frente de obra para la foto"
+            >
+              <option value="General">Frente: Obra General</option>
+              <option value="LAT">Frente: LAT 132 kV</option>
+              <option value="Leales">Frente: ET Leales</option>
+              <option value="Villa Quinteros">Frente: ET Villa Quinteros</option>
+              <option value="Bracho">Frente: ET El Bracho</option>
+            </select>
+            {interferencias.length > 0 && (
+              <select
+                value={fotoInterfDraft}
+                onChange={e => setFotoInterfDraft(e.target.value)}
+                className="bg-slate-950 border border-slate-700/80 rounded-xl px-2.5 py-2 text-[11px] text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500 max-w-full sm:max-w-[200px]"
+                aria-label="Vincular foto a interferencia o cruce"
+              >
+                <option value="">Sin cruce específico</option>
+                {interferencias.map(i => (
+                  <option key={i.id} value={i.id}>
+                    Cruce: {i.empresa}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
               type="button"
               onClick={() => document.getElementById('fileInputFoto')?.click()}
               className="flex-1 py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 border border-sky-800/40 text-sky-300 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer"
@@ -651,11 +648,18 @@ export const AnotadorTab: React.FC = () => {
             {fotosCampo.map(f => (
               <div key={f.id} className="bento-card p-3 space-y-2 bg-slate-950/90 border-slate-800 min-w-0">
                 <div className="flex justify-between items-center gap-2 text-[11px]">
-                  <span className="font-bold text-slate-200 truncate min-w-0 flex-1">{f.nombre}</span>
-                  <div className="flex items-center gap-2">
+                  <div className="min-w-0 flex-1 flex items-center gap-1.5 flex-wrap">
+                    <span className="font-bold text-slate-200 truncate">{f.nombre}</span>
+                    {f.frente && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-sky-950/70 text-sky-300 border border-sky-700/50 font-mono">
+                        {f.frente}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
                     <span className="text-slate-500 font-mono text-[10px]">{f.fecha}</span>
-                    <button 
-                      onClick={() => deleteFoto(f.id)} 
+                    <button
+                      onClick={() => deleteFoto(f.id)}
                       className="text-rose-400 hover:text-rose-300 cursor-pointer p-0.5"
                     >
                       <Trash2 className="w-3.5 h-3.5" />

@@ -47,6 +47,14 @@ export const InformesTab: React.FC = () => {
     const fechaHoyStr = hoy.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
     try {
+      const fotosDetalle = fotosCampo.slice(0, 20).map(f => ({
+        nombre: f.nombre,
+        frente: f.frente || '',
+        interferenciaId: f.interferenciaId || '',
+        fecha: f.fecha,
+        analisisIA: f.analisisIA || '',
+      }));
+
       const res = await apiFetch('/api/informes/generar', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -59,6 +67,7 @@ export const InformesTab: React.FC = () => {
           notasCampo,
           fotosCount: fotosCampo.length,
           audiosCount: audiosCampo.length,
+          fotosDetalle,
         }),
       });
       const data = await readJsonResponse(res, 'Error generando informe');
@@ -100,6 +109,18 @@ export const InformesTab: React.FC = () => {
               .join('\n')
           : '- Sin interferencias sincronizadas aún desde Drive.';
 
+      const resumenFotos =
+        fotosCampo.length > 0
+          ? `\n\n## 4. Evidencia Fotográfica de Campo (${fotosCampo.length})\n` +
+            fotosCampo
+              .slice(0, 20)
+              .map(
+                f =>
+                  `- **${f.nombre}**${f.frente ? ` (${f.frente})` : ''} [${f.fecha}]${f.analisisIA ? `: ${f.analisisIA.slice(0, 200)}` : ''}`
+              )
+              .join('\n')
+          : '';
+
       const informeLocal =
         `# 📑 ${solicitud.trim().split('\n')[0]}\n` +
         `**FECHA DE CORTE:** ${fechaHoyStr} | **PRIMER REGISTRO:** ${primerRegistroStr}\n\n` +
@@ -107,11 +128,13 @@ export const InformesTab: React.FC = () => {
         `- **Planos Planificados:** ${totalPlanificados}\n` +
         `- **Planos Emitidos:** ${totalEmitidos} (${avanceGlobalPct}%)\n` +
         `- **Con Sello APC:** ${totalApc}\n` +
-        `- **Cruces reales cargados:** ${interferencias.length}\n\n` +
+        `- **Cruces reales cargados:** ${interferencias.length}\n` +
+        `- **Fotos de campo registradas:** ${fotosCampo.length}\n\n` +
         `## 2. Estado de Cruces / Interferencias Reales\n${resumenInterf}\n\n` +
         `## 3. Catálogo de Planos (${totalEmitidos})\n` +
         `| N° | CÓDIGO | DESCRIPCIÓN | DISCIPLINA | FRENTE | REV | ESTADO |\n|---|---|---|---|---|:---:|:---:|\n` +
-        filasTabla;
+        filasTabla +
+        resumenFotos;
 
       setUltimoInforme(informeLocal);
       setFuenteInforme('datos-vivos-locales');

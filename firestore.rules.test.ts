@@ -119,11 +119,15 @@ export const DIRTY_DOZEN_TESTS: SecurityTestCase[] = [
   },
   {
     id: 13,
-    name: 'Non-master workspace user attempting to enable paid AI models in config/ia_control',
+    name: 'Non-master workspace user attempting to enable paid AI models or tamper per-user USD limits in config/ia_control',
     collectionPath: '/workspaces/obra-132kv-principal/config/ia_control',
     operation: 'update',
     auth: { uid: 'eng-uid', email: 'engineer@example.com', email_verified: true },
-    payload: { modelosPagosHabilitados: true },
+    payload: {
+      modelosPagosHabilitados: true,
+      usuariosPagosAutorizados: ['engineer@example.com'],
+      limitesPorUsuarioUsd: { 'engineer@example.com': 999 },
+    },
     expected: 'PERMISSION_DENIED',
   },
 ];

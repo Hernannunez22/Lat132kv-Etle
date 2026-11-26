@@ -15,8 +15,13 @@ declare module 'pdfjs-dist/legacy/build/pdf.mjs' {
     abort(): void;
   }
 
+  export const GlobalWorkerOptions: {
+    workerSrc: string;
+  };
+
   export function getDocument(src: {
-    data?: Uint8Array;
+    url?: string;
+    data?: Uint8Array | ArrayBuffer;
     range?: PDFDataRangeTransport;
     length?: number;
     verbosity?: number;
@@ -27,9 +32,18 @@ declare module 'pdfjs-dist/legacy/build/pdf.mjs' {
       numPages: number;
       getPage(pageNumber: number): Promise<{
         getTextContent(): Promise<{ items: Array<{ str?: string; hasEOL?: boolean }> }>;
+        getViewport(params: { scale: number; rotation?: number }): {
+          width: number;
+          height: number;
+        };
+        render(params: {
+          canvasContext: CanvasRenderingContext2D;
+          viewport: { width: number; height: number };
+        }): { promise: Promise<void>; cancel?(): void };
         cleanup?(): boolean;
       }>;
       cleanup?(): Promise<void>;
+      destroy?(): Promise<void>;
     }>;
     destroy?(): Promise<void>;
   };

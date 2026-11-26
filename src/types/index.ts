@@ -68,6 +68,8 @@ export interface FotoCampo {
   fecha: string;
   dataUrl: string;
   analisisIA?: string;
+  frente?: string;
+  interferenciaId?: string;
 }
 
 export interface ChatAdjuntoPdf {
@@ -135,12 +137,38 @@ export interface GeminiModelCatalogItem {
   disponiblePorLimite: boolean;
 }
 
+export interface GeminiUserUsageSummary {
+  email: string;
+  consultas: number;
+  inputTokens: number;
+  outputTokens: number;
+  costoUsd: number;
+  limiteUsd: number;
+}
+
+export interface OpenRouterModelSalud {
+  ultimoModeloExitoso: string | null;
+  ultimoExitoAt: string | null;
+  modelosConAlerta: Array<{
+    modelo: string;
+    estado: string;
+    mensaje: string;
+    timestamp: string;
+  }>;
+}
+
 export interface GeminiPrecisionState {
   fechaActual: string;
   nivelPreferido: PrecisionNivelId;
   modeloPreferido: string;
   politicaLimite: PoliticaLimiteModelo;
   modelosPagosHabilitados: boolean;
+  puedeUsarModelosPagos?: boolean;
+  usuariosPagosAutorizados?: string[];
+  limitesPorUsuarioUsd?: Record<string, number>;
+  usoPorUsuarioHoy?: GeminiUserUsageSummary[];
+  miConsumoHoyUsd?: number;
+  miLimiteDiarioUsd?: number;
   esUsuarioMaestro?: boolean;
   costoTotalHoyUsd: number;
   consultasTotalesHoy: number;
@@ -148,6 +176,7 @@ export interface GeminiPrecisionState {
   openRouterConfigurado: boolean;
   openRouterModeloPreferido: string;
   openRouterModelosGratuitos: Array<{ id: string; nombre: string; contextLength: number }>;
+  openRouterSalud?: OpenRouterModelSalud;
   modelos: GeminiModelCatalogItem[];
 }
 

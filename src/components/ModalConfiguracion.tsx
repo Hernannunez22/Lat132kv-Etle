@@ -22,7 +22,10 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { apiFetch, readJsonResponse } from '../utils/apiClient';
-import type { WorkspaceInviteRecord } from '../utils/firestoreSync';
+import {
+  BOOTSTRAP_ADMIN_EMAIL,
+  type WorkspaceInviteRecord,
+} from '../utils/firestoreSync';
 import type { PoliticaLimiteModelo, PrecisionNivelId } from '../types';
 
 interface ResultadoModeloDiag {
@@ -96,7 +99,11 @@ export const ModalConfiguracion: React.FC = () => {
     geminiPrecisionState,
     esUsuarioMaestro,
     modelosPagosHabilitados,
+    puedeUsarModelosPagos,
+    usuariosPagosAutorizados,
+    limitesPorUsuarioUsd,
     toggleModelosPagosMaestro,
+    actualizarControlMaestroIA,
     refrescarEstadoGemini,
     guardarConfigPrecision,
     resetearUsoGemini,
@@ -144,6 +151,8 @@ export const ModalConfiguracion: React.FC = () => {
   const [errorDiagnostico, setErrorDiagnostico] = useState<string | null>(null);
   const [guardandoModelo, setGuardandoModelo] = useState(false);
   const [cambiandoMaster, setCambiandoMaster] = useState(false);
+  const [nuevoEmailPago, setNuevoEmailPago] = useState('');
+  const [limitesUsuarioDraft, setLimitesUsuarioDraft] = useState<Record<string, string>>({});
   const [msgLimites, setMsgLimites] = useState<string | null>(null);
   const [politicaCfg, setPoliticaCfg] = useState<PoliticaLimiteModelo>('bloquear');
   const [limitesCfg, setLimitesCfg] = useState<
@@ -192,8 +201,16 @@ export const ModalConfiguracion: React.FC = () => {
     setLimitesCfg(map);
   }, [geminiPrecisionState]);
 
+  useEffect(() => {
+    const nextUserLimits: Record<string, string> = {};
+    for (const [k, v] of Object.entries(limitesPorUsuarioUsd || {})) {
+      nextUserLimits[k.toLowerCase().trim()] = String(v);
+    }
+    setLimitesUsuarioDraft(nextUserLimits);
+  }, [limitesPorUsuarioUsd]);
+
   const cambiarNivelPreferido = async (nuevoNivel: PrecisionNivelId) => {
-    const nivelEfectivo: PrecisionNivelId = modelosPagosHabilitados ? nuevoNivel : 'gratuito';
+    const nivelEfectivo: PrecisionNivelId = puedeUsarModelosPagos ? nuevoNivel : 'gratuito';
     setPrecisionNivel(nivelEfectivo);
     setGuardandoModelo(true);
     try {
@@ -212,11 +229,89 @@ export const ModalConfiguracion: React.FC = () => {
       await toggleModelosPagosMaestro(!modelosPagosHabilitados);
       setMsgLimites(
         !modelosPagosHabilitados
-          ? 'Modelos pagos habilitados para todo el equipo.'
-          : 'Modelos pagos ocultos para todo el equipo (solo motor gratuito $0).'
+          ? 'Modo selectivo activado: solo los usuarios autorizados abajo ven los niveles pagos.'
+          : 'Modelos pagos bloqueados para todo el equipo (solo motor gratuito $0).'
       );
     } catch (e: any) {
       setMsgLimites(e?.message || 'Error actualizando control maestro.');
+    } finally {
+      setCambiandoMaster(false);
+    }
+  };
+
+  const handleToggleUsuarioPago = async (emailRaw: string) => {
+    const emailNorm = emailRaw.trim().toLowerCase();
+    if (!esUsuarioMaestro || cambiandoMaster || !emailNorm) return;
+    setCambiandoMaster(true);
+    setMsgLimites(null);
+    try {
+      const yaTiene = usuariosPagosAutorizados.includes(emailNorm);
+      const nextUsers = yaTiene
+        ? usuariosPagosAutorizados.filter(u => u !== emailNorm)
+        : [...usuariosPagosAutorizados, emailNorm];
+      const nextGlobal = yaTiene ? modelosPagosHabilitados : true;
+      await actualizarControlMaestroIA({
+        modelosPagosHabilitados: nextGlobal,
+        usuariosPagosAutorizados: nextUsers,
+      });
+      setMsgLimites(
+        yaTiene
+          ? `Nivel pago deshabilitado para ${emailNorm} (ahora solo gratuito $0).`
+          : `Nivel pago habilitado para ${emailNorm}.`
+      );
+    } catch (e: any) {
+      setMsgLimites(e?.message || 'Error actualizando permiso del usuario.');
+    } finally {
+      setCambiandoMaster(false);
+    }
+  };
+
+  const handleGuardarTopesUsuarioModal = async () => {
+    if (!esUsuarioMaestro || cambiandoMaster) return;
+    setCambiandoMaster(true);
+    setMsgLimites(null);
+    try {
+      const nextLimits: Record<string, number> = {};
+      for (const [emailKey, rawVal] of Object.entries(limitesUsuarioDraft)) {
+        const clean = emailKey.trim().toLowerCase();
+        const num = Number(rawVal);
+        if (clean.includes('@') && Number.isFinite(num) && num > 0) {
+          nextLimits[clean] = Number(num.toFixed(2));
+        }
+      }
+      await actualizarControlMaestroIA({ limitesPorUsuarioUsd: nextLimits });
+      setMsgLimites('Topes diarios por usuario (USD) actualizados.');
+    } catch (e: any) {
+      setMsgLimites(e?.message || 'Error guardando topes diarios por usuario.');
+    } finally {
+      setCambiandoMaster(false);
+    }
+  };
+
+  const handleAgregarEmailPago = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const emailNorm = nuevoEmailPago.trim().toLowerCase();
+    if (!esUsuarioMaestro || cambiandoMaster) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+      setMsgLimites('Ingresa un correo electrónico válido para autorizar el nivel pago.');
+      return;
+    }
+    if (usuariosPagosAutorizados.includes(emailNorm)) {
+      setNuevoEmailPago('');
+      setMsgLimites(`${emailNorm} ya tiene acceso al nivel pago.`);
+      return;
+    }
+    setCambiandoMaster(true);
+    setMsgLimites(null);
+    try {
+      await actualizarControlMaestroIA({
+        modelosPagosHabilitados: true,
+        usuariosPagosAutorizados: [...usuariosPagosAutorizados, emailNorm],
+      });
+      setNuevoEmailPago('');
+      setMsgLimites(`Nivel pago habilitado para ${emailNorm}.`);
+    } catch (err: any) {
+      setMsgLimites(err?.message || 'Error agregando usuario autorizado.');
     } finally {
       setCambiandoMaster(false);
     }
@@ -1012,13 +1107,13 @@ export const ModalConfiguracion: React.FC = () => {
                 <h4 className="text-[11px] font-bold text-slate-200 flex items-center gap-1.5">
                   <Activity className="w-3.5 h-3.5 text-sky-400" />
                   <span>
-                    {modelosPagosHabilitados
+                    {puedeUsarModelosPagos
                       ? 'Motor Multi-Modelo IA y Diagnóstico'
                       : 'Motor IA Gratuito ($0) y Diagnóstico'}
                   </span>
                 </h4>
                 <p className="text-[10px] text-slate-400 mt-0.5">
-                  {modelosPagosHabilitados
+                  {puedeUsarModelosPagos
                     ? 'Conmuta automáticamente entre modelos si hay límite de cuota o error.'
                     : 'Opera exclusivamente con modelos gratuitos ($0.00): OpenRouter :free y Groq Whisper.'}
                 </p>
@@ -1045,39 +1140,172 @@ export const ModalConfiguracion: React.FC = () => {
 
             {esUsuarioMaestro && (
               <div
-                className={`rounded-xl border p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                className={`rounded-xl border p-3 space-y-2.5 ${
                   modelosPagosHabilitados
                     ? 'bg-amber-950/25 border-amber-500/40'
                     : 'bg-emerald-950/25 border-emerald-600/40'
                 }`}
               >
-                <div className="space-y-0.5 min-w-0">
-                  <div className="text-[11px] font-bold text-white flex items-center gap-1.5">
-                    <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>Control Maestro — Modelos Pagos</span>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="text-[11px] font-bold text-white flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Control Maestro — Nivel Pago por Usuario</span>
+                    </div>
+                    <p className="text-[10px] text-slate-300 leading-relaxed">
+                      {modelosPagosHabilitados
+                        ? `Modo selectivo activo: ${usuariosPagosAutorizados.length} usuario(s) autorizado(s) ven niveles pagos. El resto solo usa Gratuito ($0).`
+                        : 'Bloqueo global ($0): todos los usuarios operan únicamente con modelos gratuitos.'}
+                    </p>
                   </div>
-                  <p className="text-[10px] text-slate-300 leading-relaxed">
-                    {modelosPagosHabilitados
-                      ? 'Activo: todos los usuarios ven y pueden elegir los niveles pagos de Gemini.'
-                      : 'Solo Gratuito ($0): los modelos pagos están ocultos y bloqueados para todos los usuarios.'}
-                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void handleToggleMasterModal()}
+                    disabled={cambiandoMaster}
+                    className={`px-3 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer shrink-0 disabled:opacity-60 transition-colors ${
+                      modelosPagosHabilitados
+                        ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                        : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                    }`}
+                  >
+                    {cambiandoMaster
+                      ? 'Aplicando...'
+                      : modelosPagosHabilitados
+                        ? 'Bloquear Todos ($0)'
+                        : 'Habilitar Pagos (Selectivo)'}
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void handleToggleMasterModal()}
-                  disabled={cambiandoMaster}
-                  className={`px-3 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer shrink-0 disabled:opacity-60 transition-colors ${
-                    modelosPagosHabilitados
-                      ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
-                      : 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                  }`}
-                >
-                  {cambiandoMaster
-                    ? 'Aplicando...'
-                    : modelosPagosHabilitados
-                      ? 'Ocultar Pagos (Solo Gratis)'
-                      : 'Habilitar Modelos Pagos'}
-                </button>
+
+                {(() => {
+                  const usoUsuariosMap = new Map(
+                    (geminiPrecisionState?.usoPorUsuarioHoy || []).map(u => [
+                      u.email.toLowerCase().trim(),
+                      u,
+                    ])
+                  );
+                  const emailsUnicos = Array.from(
+                    new Set([
+                      BOOTSTRAP_ADMIN_EMAIL.toLowerCase(),
+                      ...invitaciones.map(i => i.invitedEmail.toLowerCase().trim()).filter(Boolean),
+                      ...usuariosPagosAutorizados.map(u => u.toLowerCase().trim()).filter(Boolean),
+                      ...Object.keys(limitesPorUsuarioUsd || {}).map(u => u.toLowerCase().trim()).filter(Boolean),
+                      ...Array.from(usoUsuariosMap.keys()),
+                    ])
+                  );
+                  const invMap = new Map(
+                    invitaciones.map(i => [i.invitedEmail.toLowerCase().trim(), i])
+                  );
+
+                  return (
+                    <div className="pt-2 border-t border-white/10 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-[10px] font-semibold text-slate-200">
+                          Permisos de nivel pago y tope diario USD por usuario (0 = sin límite):
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void handleGuardarTopesUsuarioModal()}
+                          disabled={cambiandoMaster}
+                          className="px-2 py-0.5 rounded bg-sky-600/80 hover:bg-sky-500 text-white text-[10px] font-bold cursor-pointer disabled:opacity-50"
+                        >
+                          Guardar topes USD
+                        </button>
+                      </div>
+                      <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                        {emailsUnicos.map(emailItem => {
+                          const habilitadoParaUsuario = usuariosPagosAutorizados.includes(emailItem);
+                          const esMaestroItem = emailItem === BOOTSTRAP_ADMIN_EMAIL.toLowerCase();
+                          const inv = invMap.get(emailItem);
+                          const usoHoyUser = usoUsuariosMap.get(emailItem);
+                          const limitVal = limitesUsuarioDraft[emailItem] ?? String(limitesPorUsuarioUsd[emailItem] ?? 0);
+                          const badgeTexto = esMaestroItem
+                            ? 'Tú (Maestro)'
+                            : inv
+                              ? inv.status === 'accepted'
+                                ? 'Conectado'
+                                : 'Pendiente'
+                              : 'Manual';
+
+                          return (
+                            <div
+                              key={emailItem}
+                              className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-950/80 border border-slate-800 px-2.5 py-1.5"
+                            >
+                              <div className="min-w-0 flex-1 space-y-0.5">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="text-[11px] font-mono text-slate-100 truncate">
+                                    {emailItem}
+                                  </span>
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                                    {badgeTexto}
+                                  </span>
+                                </div>
+                                <div className="text-[9px] font-mono text-slate-400">
+                                  Hoy: {usoHoyUser?.consultas ?? 0} cons. · ${(usoHoyUser?.costoUsd ?? 0).toFixed(4)} USD
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <label className="flex items-center gap-1 text-[9px] text-slate-400 font-mono">
+                                  <span>USD/día:</span>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    step={0.1}
+                                    value={limitVal}
+                                    onChange={e =>
+                                      setLimitesUsuarioDraft(prev => ({
+                                        ...prev,
+                                        [emailItem]: e.target.value,
+                                      }))
+                                    }
+                                    className="w-16 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-[10px] font-mono text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+                                    aria-label={`Tope USD diario para ${emailItem}`}
+                                  />
+                                </label>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleToggleUsuarioPago(emailItem)}
+                                  disabled={cambiandoMaster}
+                                  className={`px-2.5 py-1 rounded-md text-[10px] font-bold cursor-pointer disabled:opacity-60 transition-colors shrink-0 ${
+                                    habilitadoParaUsuario
+                                      ? 'bg-amber-500/20 text-amber-200 border border-amber-400/60 hover:bg-amber-500/30'
+                                      : 'bg-slate-900 text-slate-300 border border-slate-700 hover:border-emerald-500/50 hover:text-emerald-200'
+                                  }`}
+                                >
+                                  {habilitadoParaUsuario ? 'Nivel Pago: SÍ' : 'Solo Gratis ($0)'}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div className="flex items-center gap-1.5 pt-1">
+                        <input
+                          type="email"
+                          value={nuevoEmailPago}
+                          onChange={e => setNuevoEmailPago(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              void handleAgregarEmailPago();
+                            }
+                          }}
+                          placeholder="Agregar correo para habilitar nivel pago..."
+                          className="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-[11px] text-white font-mono placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void handleAgregarEmailPago()}
+                          disabled={cambiandoMaster || !nuevoEmailPago.trim()}
+                          className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[10px] font-bold cursor-pointer disabled:opacity-50 shrink-0"
+                        >
+                          Autorizar
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
@@ -1089,13 +1317,13 @@ export const ModalConfiguracion: React.FC = () => {
                 <div className="flex items-center gap-2">
                   <select
                     id="select-nivel-gemini"
-                    value={modelosPagosHabilitados ? precisionNivel : 'gratuito'}
+                    value={puedeUsarModelosPagos ? precisionNivel : 'gratuito'}
                     onChange={e => void cambiarNivelPreferido(e.target.value as PrecisionNivelId)}
-                    disabled={guardandoModelo || !modelosPagosHabilitados}
+                    disabled={guardandoModelo || !puedeUsarModelosPagos}
                     className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-[11px] text-white font-mono focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-80"
                   >
                     <option value="gratuito">Gratuito · OpenRouter :free ($0.00)</option>
-                    {modelosPagosHabilitados && (
+                    {puedeUsarModelosPagos && (
                       <>
                         <option value="economico">Económico · gemini-3.1-flash-lite ($0.075/$0.30 1M)</option>
                         <option value="balanceado">Estándar · gemini-4-hydrogen ($0.30/$2.50 1M)</option>
@@ -1116,7 +1344,7 @@ export const ModalConfiguracion: React.FC = () => {
                         ${geminiPrecisionState.costoTotalHoyUsd.toFixed(4)} USD
                       </strong>{' '}
                       ({geminiPrecisionState.consultasTotalesHoy} consultas)
-                      {modelosPagosHabilitados && (
+                      {puedeUsarModelosPagos && (
                         <>
                           {' '}· Histórico:{' '}
                           <strong className="text-sky-300 font-mono">
@@ -1125,7 +1353,7 @@ export const ModalConfiguracion: React.FC = () => {
                         </>
                       )}
                     </span>
-                    {modelosPagosHabilitados && (
+                    {puedeUsarModelosPagos && (
                       <select
                         value={politicaCfg}
                         onChange={e => setPoliticaCfg(e.target.value as PoliticaLimiteModelo)}
@@ -1138,7 +1366,7 @@ export const ModalConfiguracion: React.FC = () => {
                   </div>
 
                   <div className="space-y-1.5">
-                    {(modelosPagosHabilitados
+                    {(puedeUsarModelosPagos
                       ? geminiPrecisionState.modelos
                       : geminiPrecisionState.modelos.filter(m => m.nivelId === 'gratuito')
                     ).map(m => {

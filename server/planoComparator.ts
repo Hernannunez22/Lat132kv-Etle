@@ -72,6 +72,17 @@ export function eliminarPlanoComparadorDisco(rol: 'A' | 'B') {
   }
 }
 
+export function getRutaPdfComparador(rol: 'A' | 'B'): string | null {
+  asegurarDirPlanos();
+  const safeRol: 'A' | 'B' = rol === 'B' ? 'B' : 'A';
+  const rootResolved = path.resolve(PLANOS_DIR);
+  const candidate = path.resolve(PLANOS_DIR, `plano_${safeRol}.pdf`);
+  if (!candidate.startsWith(rootResolved + path.sep)) {
+    return null;
+  }
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
 export async function indexarPlanoComparadorDesdeArchivo(params: {
   rol: 'A' | 'B';
   id: string;

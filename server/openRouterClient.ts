@@ -24,6 +24,55 @@ let cachedFreeModels: OpenRouterFreeModelInfo[] = [...CURATED_FREE_MODELS];
 let cachedFreeModelsAt = 0;
 const MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
 
+const OPENROUTER_ALERT_TTL_MS = 10 * 60 * 1000;
+let ultimoOpenRouterExitoso: { modelo: string; at: number } | null = null;
+const openRouterAlertas = new Map<
+  string,
+  { estado: string; mensaje: string; timestamp: number }
+>();
+
+function recordOpenRouterSuccess(modelId: string) {
+  ultimoOpenRouterExitoso = { modelo: modelId, at: Date.now() };
+  openRouterAlertas.delete(modelId);
+}
+
+function recordOpenRouterAlert(modelId: string, estado: string, mensaje: string) {
+  openRouterAlertas.set(modelId, {
+    estado,
+    mensaje: String(mensaje || '').slice(0, 180),
+    timestamp: Date.now(),
+  });
+}
+
+export function getOpenRouterSalud() {
+  const ahora = Date.now();
+  const modelosConAlerta: Array<{
+    modelo: string;
+    estado: string;
+    mensaje: string;
+    timestamp: string;
+  }> = [];
+  for (const [modelo, info] of openRouterAlertas.entries()) {
+    if (ahora - info.timestamp > OPENROUTER_ALERT_TTL_MS) {
+      openRouterAlertas.delete(modelo);
+      continue;
+    }
+    modelosConAlerta.push({
+      modelo,
+      estado: info.estado,
+      mensaje: info.mensaje,
+      timestamp: new Date(info.timestamp).toISOString(),
+    });
+  }
+  return {
+    ultimoModeloExitoso: ultimoOpenRouterExitoso?.modelo || null,
+    ultimoExitoAt: ultimoOpenRouterExitoso
+      ? new Date(ultimoOpenRouterExitoso.at).toISOString()
+      : null,
+    modelosConAlerta,
+  };
+}
+
 export function sanitizarErrorOpenRouter(raw: unknown): string {
   return String(raw || 'Error desconocido')
     .replace(/sk-or-v1-[0-9A-Za-z_-]{12,}/g, '[OPENROUTER_KEY]')
@@ -294,7 +343,17 @@ function buildModelAttemptOrder(preferred?: string): string[] {
     'nvidia/nemotron-3-super-120b-a12b:free',
     'meta-llama/llama-3.3-70b-instruct:free',
   ];
-  return Array.from(new Set(candidates.filter(Boolean)));
+  const uniques = Array.from(new Set(candidates.filter(Boolean)));
+  const ahora = Date.now();
+  return uniques.sort((a, b) => {
+    if (a === base) return -1;
+    if (b === base) return 1;
+    const alA = openRouterAlertas.get(a);
+    const alB = openRouterAlertas.get(b);
+    const saturadoA = alA && ahora - alA.timestamp < OPENROUTER_ALERT_TTL_MS ? 1 : 0;
+    const saturadoB = alB && ahora - alB.timestamp < OPENROUTER_ALERT_TTL_MS ? 1 : 0;
+    return saturadoA - saturadoB;
+  });
 }
 
 export interface HistorialTurnoOpenRouter {
@@ -396,6 +455,7 @@ export async function generarChatOpenRouter(params: {
             if (errInfo.estado === 'CONTEXTO_EXCEDIDO' && maxChars > 32000) {
               continue; // reintentar con contexto más compacto en el mismo modelo
             }
+            recordOpenRouterAlert(modelId, errInfo.estado, errInfo.mensaje);
             if (errInfo.estado === 'CLAVE_INVALIDA' || errInfo.estado === 'CREDITOS_AGOTADOS') {
               break; // probar siguiente clave si hubiera
             }
@@ -411,15 +471,18 @@ export async function generarChatOpenRouter(params: {
                 : '';
 
           if (!texto) {
+            recordOpenRouterAlert(modelId, 'RESPUESTA_VACIA', 'OpenRouter devolvió respuesta vacía');
             lastError = new Error(`OpenRouter devolvió respuesta vacía (${modelId}).`);
             break;
           }
 
+          const modelFinal = String(data?.model || modelId);
+          recordOpenRouterSuccess(modelFinal);
           const promptTok = Number(data?.usage?.prompt_tokens || 0);
           const compTok = Number(data?.usage?.completion_tokens || 0);
           return {
             texto,
-            modelUsed: String(data?.model || modelId),
+            modelUsed: modelFinal,
             keySourceUsed: kc.nombre,
             inputTokens: promptTok > 0 ? promptTok : Math.max(1, Math.round(promptTexto.length / 4)),
             outputTokens: compTok > 0 ? compTok : Math.max(1, Math.round(texto.length / 4)),
@@ -427,6 +490,7 @@ export async function generarChatOpenRouter(params: {
         } catch (err: any) {
           lastError = err;
           if (err?.estado === 'CONTEXTO_EXCEDIDO' && maxChars > 32000) continue;
+          recordOpenRouterAlert(modelId, err?.estado || 'ERROR_OPENROUTER', err?.message || 'Error');
           break;
         }
       }
@@ -505,6 +569,7 @@ export async function generarStreamOpenRouter(params: {
             if (info.estado === 'CONTEXTO_EXCEDIDO' && maxChars > 32000) {
               continue;
             }
+            recordOpenRouterAlert(modelId, info.estado, info.mensaje);
             break;
           }
 
@@ -561,6 +626,7 @@ export async function generarStreamOpenRouter(params: {
           }
 
           if (textoCompleto.trim().length > 0) {
+            recordOpenRouterSuccess(realModel);
             return {
               textoCompleto,
               modelUsed: realModel,
@@ -571,6 +637,7 @@ export async function generarStreamOpenRouter(params: {
             };
           }
 
+          recordOpenRouterAlert(modelId, 'STREAM_VACIO', 'Stream vacío de OpenRouter');
           lastError = new Error(`Stream vacío de OpenRouter (${modelId}).`);
           break;
         } catch (err: any) {
@@ -578,6 +645,7 @@ export async function generarStreamOpenRouter(params: {
           if (err?.estado === 'CONTEXTO_EXCEDIDO' && maxChars > 32000) {
             continue;
           }
+          recordOpenRouterAlert(modelId, err?.estado || 'ERROR_OPENROUTER', err?.message || 'Error');
           break;
         }
       }

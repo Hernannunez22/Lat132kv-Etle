@@ -7,7 +7,7 @@
 4. **Terminal State Locking**: In `/workspaces/{workspaceId}/invites/{inviteId}`, once `status == 'accepted'`, non-admin clients cannot alter or re-accept the invite.
 5. **PII Isolation**: User email addresses are stored exclusively in `/users/{userId}/private/{docId}` (readable only by owner) and `/workspaces/{workspaceId}/invites/{inviteId}` (readable only by workspace admin or the matching verified email recipient).
 6. **Strict Keys & Size Boundaries**: Every write passes `isValid[Entity](incoming())` enforcing `hasAll`/`hasOnly`, `isValidId()` regex (`^[a-zA-Z0-9_\-]+$`), string `.size()` bounds, and list `.size()` bounds.
-7. **Master AI Control Isolation**: `/workspaces/{workspaceId}/config/ia_control` can be read via `get` only by verified workspace members (`list` disabled), and can be created, updated, or deleted strictly by `isBootstrappedAdmin()` (`hernannunez27@gmail.com` verified).
+7. **Master AI Control Isolation**: `/workspaces/{workspaceId}/config/ia_control` can be read via `get` only by verified workspace members (`list` disabled), and can be created, updated, or deleted strictly by `isBootstrappedAdmin()` (`hernannunez27@gmail.com` verified), including the bounded `usuariosPagosAutorizados` allowlist (<=50 emails) and `limitesPorUsuarioUsd` map (<=50 entries).
 
 ## 2. The "Dirty Dozen" Attack Payloads
 1. **Unauthenticated Write**: `ownerId: "u1"` written without `request.auth`. -> Expected: `PERMISSION_DENIED`.
@@ -22,4 +22,4 @@
 10. **Unbounded Array Attack**: Submitting `memberUids` with >25 elements or `faltantes` with >50 elements or non-string first element. -> Expected: `PERMISSION_DENIED`.
 11. **PII Leak Read**: Signed-in non-owner reading `/users/{otherUid}/private/profile`. -> Expected: `PERMISSION_DENIED`.
 12. **Unscoped List Scraping**: Querying `/workspaces/{wid}/hitos` as a signed-in user who is NOT in `memberUids` and not bootstrapped admin without a matching `memberUids` filter. -> Expected: `PERMISSION_DENIED`.
-13. **Non-Master Paid AI Activation**: A verified workspace member/admin other than `hernannunez27@gmail.com` trying to write `/workspaces/{wid}/config/ia_control` with `modelosPagosHabilitados: true`. -> Expected: `PERMISSION_DENIED`.
+13. **Non-Master Paid AI Activation / Allowlist Tampering**: A verified workspace member/admin other than `hernannunez27@gmail.com` trying to write `/workspaces/{wid}/config/ia_control` with `modelosPagosHabilitados: true` or injecting their email into `usuariosPagosAutorizados`. -> Expected: `PERMISSION_DENIED`.

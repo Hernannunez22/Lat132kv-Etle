@@ -1,5 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useApp } from '../context/AppContext';
+import { comprimirImagenCampo } from '../utils/imageFieldUtils';
+import { apiFetch, readJsonResponse } from '../utils/apiClient';
 import {
   DEFAULT_DRIVE_ROOT_FOLDER_ID,
   esErrorPopupBloqueado,
@@ -15,6 +17,8 @@ import {
   FolderOpen,
   Loader2,
   RefreshCw,
+  Camera,
+  HardDrive,
 } from 'lucide-react';
 
 const STORAGE_KEY_INTERFERENCIAS_FOLDER = 'drive_folder_interferencias_132kv';
@@ -26,6 +30,10 @@ export const InterferenciasTab: React.FC = () => {
     hasDriveToken,
     driveConnectionState,
     conectarGoogleDriveChat,
+    ultimaSyncDrive,
+    fotosCampo,
+    addFoto,
+    actualizarFotoAnalisis,
   } = useApp();
   const [filtro, setFiltro] = useState<'TODOS' | 'LISTOS' | 'FALTANTES'>('TODOS');
   const [folderInput, setFolderInput] = useState<string>(
@@ -34,6 +42,9 @@ export const InterferenciasTab: React.FC = () => {
   const [mostrarFolderInput, setMostrarFolderInput] = useState(false);
   const [sincronizandoDrive, setSincronizandoDrive] = useState(false);
   const [errorSync, setErrorSync] = useState<string | null>(null);
+  const [subiendoFotoCruceId, setSubiendoFotoCruceId] = useState<string | null>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
+  const targetCruceRef = useRef<{ id: string; empresa: string } | null>(null);
   const [resumenSync, setResumenSync] = useState<{
     carpetaInterferenciasNombre: string;
     subcarpetasDetectadas: number;
@@ -67,6 +78,54 @@ export const InterferenciasTab: React.FC = () => {
       );
     } finally {
       setSincronizandoDrive(false);
+    }
+  };
+
+  const handleCapturarFotoCruce = (cruceId: string, empresa: string) => {
+    targetCruceRef.current = { id: cruceId, empresa };
+    photoInputRef.current?.click();
+  };
+
+  const handleArchivoFotoCruce = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const target = targetCruceRef.current;
+    e.target.value = '';
+    if (!file || !target) return;
+
+    setSubiendoFotoCruceId(target.id);
+    try {
+      const { dataUrl } = await comprimirImagenCampo(file);
+      const fotoId = `foto_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const nombreFoto = `${target.empresa} - ${file.name}`;
+      addFoto({
+        id: fotoId,
+        nombre: nombreFoto,
+        fecha: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        dataUrl,
+        frente: target.empresa,
+        interferenciaId: target.id,
+      });
+
+      try {
+        const res = await apiFetch('/api/anotador/analizar-foto', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dataUrl,
+            nombre: nombreFoto,
+            notaActual: `Inspección de cruce/interferencia con ${target.empresa}`,
+          }),
+        });
+        const data = await readJsonResponse(res, 'Error analizando foto del cruce');
+        if (res.ok && data?.exito && data?.analisisIA) {
+          actualizarFotoAnalisis(fotoId, String(data.analisisIA));
+        }
+      } catch {
+        // Guardado en caché local incluso sin conexión
+      }
+    } finally {
+      setSubiendoFotoCruceId(null);
+      targetCruceRef.current = null;
     }
   };
 
@@ -150,21 +209,44 @@ export const InterferenciasTab: React.FC = () => {
           </div>
         )}
 
-        {hasDriveToken && driveConnectionState.accountEmail && (
-          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-teal-300/90 pt-1">
-            <span>
-              Drive activo: <strong className="font-mono">{driveConnectionState.accountEmail}</strong>
-              {driveConnectionState.remainingMinutes > 0 ? ` (${driveConnectionState.remainingMinutes} min restantes)` : ''}
-            </span>
-            <button
-              type="button"
-              onClick={() => void conectarGoogleDriveChat({ forceConsent: true })}
-              className="text-[10px] underline text-slate-300 hover:text-white cursor-pointer"
-            >
-              Cambiar cuenta / Reautorizar
-            </button>
+        {(hasDriveToken || ultimaSyncDrive || interferencias.length > 0) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] pt-1">
+            {hasDriveToken && driveConnectionState.accountEmail ? (
+              <span className="text-teal-300/90">
+                Drive activo: <strong className="font-mono">{driveConnectionState.accountEmail}</strong>
+                {driveConnectionState.remainingMinutes > 0 ? ` (${driveConnectionState.remainingMinutes} min restantes)` : ''}
+              </span>
+            ) : (
+              <span className="text-slate-300 inline-flex items-center gap-1.5">
+                <HardDrive className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                <span>
+                  Caché local listo ({interferencias.length} cruces)
+                  {ultimaSyncDrive
+                    ? ` · Última sync: ${new Date(ultimaSyncDrive.fechaIso).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`
+                    : ''}
+                </span>
+              </span>
+            )}
+            {hasDriveToken && (
+              <button
+                type="button"
+                onClick={() => void conectarGoogleDriveChat({ forceConsent: true })}
+                className="text-[10px] underline text-slate-300 hover:text-white cursor-pointer"
+              >
+                Cambiar cuenta / Reautorizar
+              </button>
+            )}
           </div>
         )}
+
+        <input
+          ref={photoInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={e => void handleArchivoFotoCruce(e)}
+        />
 
         {errorSync && (
           <div className="rounded-xl bg-rose-950/40 border border-rose-500/40 p-3 text-xs text-rose-200 space-y-2">
@@ -423,6 +505,54 @@ export const InterferenciasTab: React.FC = () => {
                       </ul>
                     </div>
                   )}
+
+                  {/* Evidencia fotográfica vinculada al cruce */}
+                  {(() => {
+                    const cruceKeyId = item.id || `cruce_${idx}`;
+                    const fotosCruce = fotosCampo.filter(
+                      f => f.interferenciaId === cruceKeyId || (!f.interferenciaId && f.frente === item.empresa)
+                    );
+                    const subiendoAqui = subiendoFotoCruceId === cruceKeyId;
+                    return (
+                      <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-mono text-slate-400">
+                            Fotos en terreno: {fotosCruce.length}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleCapturarFotoCruce(cruceKeyId, item.empresa)}
+                            disabled={subiendoAqui}
+                            className="px-2.5 py-1 rounded-lg bg-sky-950/80 hover:bg-sky-900 text-sky-300 border border-sky-700/50 text-[10px] font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                          >
+                            {subiendoAqui ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Camera className="w-3 h-3" />
+                            )}
+                            <span>{subiendoAqui ? 'Guardando...' : '+ Foto de Obra'}</span>
+                          </button>
+                        </div>
+                        {fotosCruce.length > 0 && (
+                          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                            {fotosCruce.slice(0, 4).map(ft => (
+                              <div key={ft.id} className="shrink-0 w-20 space-y-1">
+                                <img
+                                  src={ft.dataUrl}
+                                  alt={ft.nombre}
+                                  className="w-20 h-14 object-cover rounded border border-slate-700"
+                                  title={ft.analisisIA || ft.nombre}
+                                />
+                                <div className="text-[9px] text-slate-400 truncate font-mono">
+                                  {ft.fecha}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             );

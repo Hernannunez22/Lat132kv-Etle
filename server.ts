@@ -1,7 +1,7 @@
 import express from 'express';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { ThinkingLevel, Type } from '@google/genai';
 import {
   PliegoReal,
   MinutaReunion,
@@ -15,13 +15,12 @@ import {
   SentidoNotaLibro,
 } from './src/types';
 import { buscarYExtraerDePliegosReales } from './src/data/pliegosContractuales';
-import { attachVerifiedFirebaseUser, sanitizeSafeId, type FirebaseVerifiedUser } from './server/authMiddleware';
+import { attachVerifiedFirebaseUser, sanitizeSafeId } from './server/authMiddleware';
 import {
   PliegoIndexado,
   procesarArchivoPliego,
   procesarArchivoDesdeDisco,
   procesarTextoPliego,
-  cargarPliegosDesdeDisco,
   eliminarPliegoDeDisco,
   limpiarPliegosDeDisco,
   asegurarGeminiFileUri,
@@ -31,16 +30,11 @@ import {
   getRutaUploadTemp,
 } from './server/pliegoProcessor';
 import {
-  PlanoComparadorIndexado,
-  cargarPlanosComparador,
-  eliminarPlanoComparadorDisco,
   indexarPlanoComparadorBuffer,
   indexarPlanoComparadorDesdeArchivo,
-  prepararPartesComparacion,
   compararPlanosLocalFallback,
 } from './server/planoComparator';
 import {
-  cargarStoreMinutas,
   guardarStoreMinutas,
   extraerTextoMinutaBuffer,
   inferirMetadatosMinuta,
@@ -54,7 +48,6 @@ import {
 } from './server/driveMinutas';
 import {
   ChatAdjuntoIndexado,
-  cargarChatAdjuntos,
   guardarChatAdjunto,
   eliminarChatAdjuntoDisco,
   limpiarChatAdjuntosDisco,
@@ -63,12 +56,10 @@ import {
   auditarAdjuntoVsPliegoLocal,
 } from './server/chatAdjuntos';
 import {
-  cargarStoreInterferencias,
   guardarStoreInterferencias,
   sincronizarInterferenciasDesdeGoogleDrive,
 } from './server/driveInterferencias';
 import {
-  cargarStoreNotasLibro,
   guardarStoreNotasLibro,
   analizarNotaLibroConIA,
   recalcularHilosYRespuestas,
@@ -80,8 +71,6 @@ import {
 } from './server/notasLibroManager';
 import { sincronizarNotasLibroDesdeGoogleDrive } from './server/driveNotasLibro';
 import {
-  DriveDocumentoIndexado,
-  cargarDriveDocumentosStore,
   buscarYLeerDocumentosDriveEnVivo,
   sincronizarDocsTecnicosDriveCarpeta,
   extraerTerminosBusquedaDrive,
@@ -89,49 +78,28 @@ import {
 } from './server/driveDocumentos';
 import { analizarYExpandirConsulta } from './server/semanticSearch';
 import {
-  ElencosDriveState,
   DEFAULT_ELENCOS_FOLDER_ID,
-  cargarElencosDriveStore,
   sincronizarElencosDesdeGoogleDrive,
 } from './server/driveElencos';
 import {
-  PRIMARY_GEMINI_MODEL,
   OPENROUTER_FREE_MODEL,
-  AUDIO_TRANSCRIBE_MODEL,
-  DEFAULT_TEXT_MODELS,
-  obtenerCandidatosApiKeys,
-  obtenerResumenVariablesEntorno,
   clasificarErrorGemini,
   formatearAvisoErrorGemini,
   generarContenidoConFallback,
   generarStreamConFallback,
-  sanitizarTextoError,
-  getPreferredGeminiModel,
-  setPreferredGeminiModel,
-  getLastWorkingGeminiInfo,
-  getUltimoErrorGemini,
-  setUltimoErrorGemini,
   clearUltimoErrorGemini,
   getGeminiPrecisionState,
-  updateGeminiPrecisionConfig,
-  resetGeminiUsoDiario,
   resolverEjecucionPrecision,
   registrarConsumoGemini,
   getOpenRouterModeloPreferido,
-  MASTER_ADMIN_EMAIL,
   isModelosPagosHabilitados,
-  setModelosPagosHabilitados,
-  type IntentoModeloResultado,
+  runWithAiRequestContext,
 } from './server/geminiClient';
 import {
-  clasificarErrorOpenRouter,
   formatearAvisoErrorOpenRouter,
   generarChatOpenRouter,
   generarStreamOpenRouter,
   generarVisionOpenRouter,
-  obtenerCandidatosOpenRouterKeys,
-  obtenerResumenOpenRouterEnv,
-  refrescarModelosGratuitosOpenRouter,
   tieneOpenRouterConfigurado,
   type HistorialTurnoOpenRouter,
 } from './server/openRouterClient';
@@ -145,22 +113,25 @@ import {
   transcribirAudioCortoConGroq,
   transcribirAudioLargo,
 } from './server/groqAudio';
+import { attachAiRequestContext } from './server/utils/authRequest';
+import {
+  GEMINI_MODEL,
+  GEMINI_TRANSCRIBE_MODEL,
+  obraState,
+  obtenerClienteGeminiActivo,
+  obtenerAvisoSinClienteGemini,
+  toPliegoResumenCliente,
+  toPlanoComparadorCliente,
+  toChatAdjuntoCliente,
+} from './server/utils/runtimeState';
+import { createGeminiRouter } from './server/routes/gemini.routes';
+import { createComparadorRouter } from './server/routes/comparador.routes';
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-const GEMINI_MODEL = PRIMARY_GEMINI_MODEL;
-const GEMINI_TRANSCRIBE_MODEL = AUDIO_TRANSCRIBE_MODEL;
 
 app.use('/api', attachVerifiedFirebaseUser);
-
-function esUsuarioMaestroRequest(req: express.Request): boolean {
-  const user = (req as express.Request & { firebaseUser?: FirebaseVerifiedUser }).firebaseUser;
-  return Boolean(
-    user?.emailVerified &&
-      typeof user.email === 'string' &&
-      user.email.toLowerCase().trim() === MASTER_ADMIN_EMAIL
-  );
-}
+app.use('/api', attachAiRequestContext);
 
 type DestinoSubida = 'pliego' | 'planoA' | 'planoB' | 'chatPdf';
 
@@ -234,15 +205,16 @@ function depurarJobsAudioAntiguos() {
 }
 
 function ejecutarProcesamientoAudioAsync(job: JobAudioMinuta, uploadPath: string) {
-  (async () => {
+  const allowPagosJob = isModelosPagosHabilitados();
+  void runWithAiRequestContext({ allowPagos: allowPagosJob, esMaestro: false }, async () => {
     try {
       const pagosHabilitados = isModelosPagosHabilitados();
       const clienteAi = pagosHabilitados ? obtenerClienteGeminiActivo() : null;
       const motorEfectivo: 'gratuito' | 'gemini' =
         pagosHabilitados && job.motor === 'gemini' ? 'gemini' : 'gratuito';
       const modeloElegido = job.modeloMinutaId
-        ? storeMinutas.minutas.find(m => m.id === job.modeloMinutaId) || null
-        : storeMinutas.minutas[0] || null;
+        ? obraState.storeMinutas.minutas.find(m => m.id === job.modeloMinutaId) || null
+        : obraState.storeMinutas.minutas[0] || null;
 
       const transRes = await transcribirAudioLargo({
         inputPath: uploadPath,
@@ -294,112 +266,10 @@ function ejecutarProcesamientoAudioAsync(job: JobAudioMinuta, uploadPath: string
         if (fs.existsSync(uploadPath)) fs.unlinkSync(uploadPath);
       } catch {}
     }
-  })();
+  });
 }
 
-function inicializarGemini(): { client: GoogleGenAI | null; keySource: string | null } {
-  const candidatos = obtenerCandidatosApiKeys();
-  if (candidatos.length > 0) {
-    return {
-      client: candidatos[0].client,
-      keySource: candidatos[0].nombre,
-    };
-  }
-  return { client: null, keySource: null };
-}
-
-const initGemini = inicializarGemini();
-let ai: GoogleGenAI | null = initGemini.client;
-let geminiKeySource: string | null = initGemini.keySource;
-
-function obtenerClienteGeminiActivo(): GoogleGenAI | null {
-  const recarga = inicializarGemini();
-  if (recarga.client) {
-    ai = recarga.client;
-    geminiKeySource = recarga.keySource;
-  }
-  return ai;
-}
-
-function obtenerAvisoSinClienteGemini(): string {
-  const rawApi = (process.env.API_KEY || '').trim();
-  const rawGemini = (process.env.GEMINI_API_KEY || '').trim();
-  if (/MY_GEMINI_API_KEY/i.test(rawApi) || /MY_GEMINI_API_KEY/i.test(rawGemini)) {
-    return `> ⚠️ **El servidor aún está recibiendo el valor de plantilla (\`MY_GEMINI_API_KEY\`) en este contenedor.** Se ignoró ese valor y no hay otra clave válida en \`API_KEY\` ni en \`GEMINI_API_KEY\`. Guarda tu clave real en **Settings > Secrets** y recarga/republica el entorno.\n\n`;
-  }
-  return `> ⚠️ **No se detectó una clave válida en \`API_KEY\` ni en \`GEMINI_API_KEY\` en el proceso del servidor.** Configúrala en **Settings > Secrets** y recarga el entorno para habilitar el análisis profundo con **Gemini**.\n\n`;
-}
-
-// Almacenamiento en memoria + disco de los pliegos REALES, planos comparador, adjuntos de chat y minutas
-let pliegosIndexados: PliegoIndexado[] = cargarPliegosDesdeDisco();
-let planosComparador = cargarPlanosComparador();
-let chatAdjuntos: ChatAdjuntoIndexado[] = cargarChatAdjuntos();
-let storeMinutas = cargarStoreMinutas();
-let storeInterferencias = cargarStoreInterferencias();
-let storeNotasLibro: NotaLibro[] = recalcularHilosYRespuestas(cargarStoreNotasLibro());
-let storeDriveDocumentos: DriveDocumentoIndexado[] = cargarDriveDocumentosStore();
-let storeElencos: ElencosDriveState = cargarElencosDriveStore();
-if (pliegosIndexados.length > 0) {
-  console.log(`[Pliegos] ${pliegosIndexados.length} pliego(s) restaurado(s) desde caché.`);
-}
-if (storeNotasLibro.length > 0) {
-  console.log(`[NotasLibro] ${storeNotasLibro.length} nota(s) de libro restaurada(s) desde caché.`);
-}
-if (storeDriveDocumentos.length > 0) {
-  console.log(`[DriveDocs] ${storeDriveDocumentos.length} documento(s) técnico(s) de Drive restaurado(s) desde caché.`);
-}
-
-function toPliegoResumenCliente(p: PliegoIndexado): PliegoReal {
-  return {
-    id: p.id,
-    nombre: p.nombre,
-    tipoMime: p.tipoMime,
-    tamanioBytes: p.tamanioBytes,
-    tamanioTexto: p.tamanioTexto,
-    fechaSubida: p.fechaSubida,
-    paginas: p.paginas,
-    caracteresTexto: p.caracteresTexto,
-    esEscaneado: p.esEscaneado,
-    tiempoProcesoMs: p.tiempoProcesoMs,
-    contenidoTexto: p.contenidoTexto ? p.contenidoTexto.slice(0, 60000) : '',
-  };
-}
-
-function toPlanoComparadorCliente(p: PlanoComparadorIndexado | null) {
-  if (!p) return null;
-  return {
-    id: p.id,
-    rol: p.rol,
-    nombre: p.nombre,
-    tipoMime: p.tipoMime,
-    tamanioBytes: p.tamanioBytes,
-    tamanioTexto: p.tamanioTexto,
-    fechaSubida: p.fechaSubida,
-    paginas: p.paginas,
-    caracteresTexto: p.caracteresTexto,
-    esEscaneado: p.esEscaneado,
-    tiempoProcesoMs: p.tiempoProcesoMs,
-    metricasDetectadas: p.metricasDetectadas,
-    contenidoTexto: p.contenidoTexto ? p.contenidoTexto.slice(0, 40000) : '',
-  };
-}
-
-function toChatAdjuntoCliente(p: ChatAdjuntoIndexado) {
-  return {
-    id: p.id,
-    nombre: p.nombre,
-    tipoMime: p.tipoMime,
-    tamanioBytes: p.tamanioBytes,
-    tamanioTexto: p.tamanioTexto,
-    fechaSubida: p.fechaSubida,
-    paginas: p.paginas,
-    caracteresTexto: p.caracteresTexto,
-    esEscaneado: p.esEscaneado,
-    tiempoProcesoMs: p.tiempoProcesoMs,
-    metricasDetectadas: p.metricasDetectadas,
-    contenidoTexto: p.contenidoTexto ? p.contenidoTexto.slice(0, 40000) : '',
-  };
-}
+// Estado compartido en memoria + disco (obraState) importado desde ./server/utils/runtimeState
 
 // Endpoint rápido para subir archivo binario chico (< 3.5 MB) en un solo paso
 app.post(
@@ -434,7 +304,7 @@ app.post(
           buffer,
           fechaSubida,
         });
-        chatAdjuntos = [adj, ...chatAdjuntos.filter(a => a.id !== adj.id)];
+        obraState.chatAdjuntos = [adj, ...obraState.chatAdjuntos.filter(a => a.id !== adj.id)];
         const clienteAi = obtenerClienteGeminiActivo();
         if (adj.esEscaneado && clienteAi) {
           asegurarGeminiFileUri(adj as unknown as PliegoIndexado, clienteAi).catch(() => {});
@@ -456,7 +326,7 @@ app.post(
           buffer,
           fechaSubida,
         });
-        planosComparador[rol] = plano;
+        obraState.planosComparador[rol] = plano;
         res.json({
           exito: true,
           plano: toPlanoComparadorCliente(plano),
@@ -472,10 +342,10 @@ app.post(
         fechaSubida,
       });
 
-      pliegosIndexados = [indexado, ...pliegosIndexados.filter(p => p.id !== indexado.id)];
+      obraState.pliegosIndexados = [indexado, ...obraState.pliegosIndexados.filter(p => p.id !== indexado.id)];
 
-      if (indexado.esEscaneado && ai) {
-        asegurarGeminiFileUri(indexado, ai).catch(() => {});
+      if (indexado.esEscaneado && obraState.ai) {
+        asegurarGeminiFileUri(indexado, obraState.ai).catch(() => {});
       }
 
       console.log(
@@ -485,7 +355,7 @@ app.post(
       res.json({
         exito: true,
         pliego: toPliegoResumenCliente(indexado),
-        totalPliegos: pliegosIndexados.length,
+        totalPliegos: obraState.pliegosIndexados.length,
       });
     } catch (err: any) {
       const status = err?.status === 400 ? 400 : 500;
@@ -592,9 +462,9 @@ app.post(
       });
       nuevaMinuta.resumen = analisis.resumen;
 
-      storeMinutas.minutas = [nuevaMinuta, ...storeMinutas.minutas];
-      storeMinutas.compromisos = [...analisis.compromisos, ...storeMinutas.compromisos];
-      guardarStoreMinutas(storeMinutas);
+      obraState.storeMinutas.minutas = [nuevaMinuta, ...obraState.storeMinutas.minutas];
+      obraState.storeMinutas.compromisos = [...analisis.compromisos, ...obraState.storeMinutas.compromisos];
+      guardarStoreMinutas(obraState.storeMinutas);
 
       res.json({
         exito: true,
@@ -673,14 +543,14 @@ app.post(
         model: GEMINI_MODEL,
       });
 
-      storeNotasLibro = recalcularHilosYRespuestas([nuevaNota, ...storeNotasLibro]);
-      guardarStoreNotasLibro(storeNotasLibro);
+      obraState.storeNotasLibro = recalcularHilosYRespuestas([nuevaNota, ...obraState.storeNotasLibro]);
+      guardarStoreNotasLibro(obraState.storeNotasLibro);
 
-      const notaFinal = storeNotasLibro.find(n => n.id === notaId) || nuevaNota;
+      const notaFinal = obraState.storeNotasLibro.find(n => n.id === notaId) || nuevaNota;
       res.json({
         exito: true,
         nota: notaFinal,
-        notasLibro: storeNotasLibro,
+        notasLibro: obraState.storeNotasLibro,
       });
     } catch (err: any) {
       console.error('[NotasLibro] Error en /api/notas-libro/subir:', err);
@@ -857,7 +727,7 @@ app.post('/api/pliegos/subir/finalizar', (req, res) => {
               job.detalle = `Extrayendo texto de adjunto Chat: página ${procesadas} de ${total}...`;
             },
           });
-          chatAdjuntos = [adj, ...chatAdjuntos.filter(a => a.id !== adj.id)];
+          obraState.chatAdjuntos = [adj, ...obraState.chatAdjuntos.filter(a => a.id !== adj.id)];
           const clienteAi = obtenerClienteGeminiActivo();
           if (adj.esEscaneado && clienteAi) {
             asegurarGeminiFileUri(adj as unknown as PliegoIndexado, clienteAi).catch(() => {});
@@ -885,7 +755,7 @@ app.post('/api/pliegos/subir/finalizar', (req, res) => {
               job.detalle = `Analizando Plano ${rol}: página ${procesadas} de ${total}...`;
             },
           });
-          planosComparador[rol] = plano;
+          obraState.planosComparador[rol] = plano;
           job.estado = 'completado';
           job.progreso = 100;
           job.detalle = `Plano ${rol} indexado (${plano.paginas} págs)`;
@@ -907,11 +777,11 @@ app.post('/api/pliegos/subir/finalizar', (req, res) => {
           },
         });
 
-        pliegosIndexados = [indexado, ...pliegosIndexados.filter(p => p.id !== indexado.id)];
+        obraState.pliegosIndexados = [indexado, ...obraState.pliegosIndexados.filter(p => p.id !== indexado.id)];
 
-        if (indexado.esEscaneado && ai) {
+        if (indexado.esEscaneado && obraState.ai) {
           job.detalle = 'Subiendo PDF escaneado a Gemini Files API (una sola vez)...';
-          asegurarGeminiFileUri(indexado, ai).catch(() => {});
+          asegurarGeminiFileUri(indexado, obraState.ai).catch(() => {});
         }
 
         const resumenCliente = toPliegoResumenCliente(indexado);
@@ -962,7 +832,7 @@ app.get('/api/pliegos/subir/estado/:id', (req, res) => {
 app.get('/api/chat/adjuntos', (_req, res) => {
   res.json({
     exito: true,
-    adjuntos: chatAdjuntos.map(toChatAdjuntoCliente),
+    adjuntos: obraState.chatAdjuntos.map(toChatAdjuntoCliente),
   });
 });
 
@@ -970,7 +840,7 @@ app.post('/api/chat/adjuntos/hidratar', (req, res) => {
   try {
     const incoming = Array.isArray(req.body?.adjuntos) ? req.body.adjuntos : [];
     const byId = new Map<string, ChatAdjuntoIndexado>();
-    for (const a of chatAdjuntos) {
+    for (const a of obraState.chatAdjuntos) {
       byId.set(a.id, a);
     }
     for (const item of incoming) {
@@ -995,11 +865,11 @@ app.post('/api/chat/adjuntos/hidratar', (req, res) => {
         guardarChatAdjunto(adj);
       }
     }
-    chatAdjuntos = Array.from(byId.values());
+    obraState.chatAdjuntos = Array.from(byId.values());
     res.json({
       exito: true,
-      total: chatAdjuntos.length,
-      adjuntos: chatAdjuntos.map(toChatAdjuntoCliente),
+      total: obraState.chatAdjuntos.length,
+      adjuntos: obraState.chatAdjuntos.map(toChatAdjuntoCliente),
     });
   } catch (err: any) {
     const status = err?.status === 400 ? 400 : 500;
@@ -1010,9 +880,9 @@ app.post('/api/chat/adjuntos/hidratar', (req, res) => {
 app.delete('/api/chat/adjuntos/:id', (req, res) => {
   try {
     const safeId = sanitizeSafeId(req.params.id, 'adjuntoId');
-    chatAdjuntos = chatAdjuntos.filter(a => a.id !== safeId);
+    obraState.chatAdjuntos = obraState.chatAdjuntos.filter(a => a.id !== safeId);
     eliminarChatAdjuntoDisco(safeId);
-    res.json({ exito: true, totalRestantes: chatAdjuntos.length });
+    res.json({ exito: true, totalRestantes: obraState.chatAdjuntos.length });
   } catch (err: any) {
     const status = err?.status === 400 ? 400 : 500;
     res.status(status).json({ exito: false, error: err?.message || 'ID de adjunto inválido' });
@@ -1020,476 +890,21 @@ app.delete('/api/chat/adjuntos/:id', (req, res) => {
 });
 
 app.post('/api/chat/adjuntos/limpiar', (_req, res) => {
-  chatAdjuntos = [];
+  obraState.chatAdjuntos = [];
   limpiarChatAdjuntosDisco();
   res.json({ exito: true });
 });
 
-// Endpoints del Comparador de Planos PDF
-app.get('/api/comparador/planos', (req, res) => {
-  const esMaestro = esUsuarioMaestroRequest(req);
-  const info = getLastWorkingGeminiInfo({ esMaestro });
-  res.json({
-    exito: true,
-    planoA: toPlanoComparadorCliente(planosComparador.A),
-    planoB: toPlanoComparadorCliente(planosComparador.B),
-    tieneGeminiKey: isModelosPagosHabilitados() && Boolean(obtenerClienteGeminiActivo()),
-    modelo: info.modelo || OPENROUTER_FREE_MODEL,
-    modelosDisponibles: info.modelosTextoDisponibles,
-    modeloPreferido: info.modeloPreferido,
-    ultimoErrorGemini: isModelosPagosHabilitados() ? getUltimoErrorGemini() : null,
-  });
-});
-
-app.get('/api/gemini/config', async (req, res) => {
-  await refrescarModelosGratuitosOpenRouter(false);
-  const esMaestro = esUsuarioMaestroRequest(req);
-  res.json({
-    exito: true,
-    ...getLastWorkingGeminiInfo({ esMaestro }),
-  });
-});
-
-app.post('/api/gemini/config', (req, res) => {
-  const esMaestro = esUsuarioMaestroRequest(req);
-  const {
-    nivelPreferido,
-    modeloPreferido,
-    politicaLimite,
-    openRouterModeloPreferido,
-    limitesPorModelo,
-  } = req.body || {};
-
-  const nivelStr = typeof nivelPreferido === 'string' ? nivelPreferido.trim() : undefined;
-  if (
-    !isModelosPagosHabilitados() &&
-    !esMaestro &&
-    nivelStr &&
-    nivelStr !== 'gratuito'
-  ) {
-    res.status(403).json({
-      exito: false,
-      error: 'Los modelos pagos están desactivados por el administrador maestro.',
-      ...getLastWorkingGeminiInfo({ esMaestro }),
-    });
-    return;
-  }
-
-  updateGeminiPrecisionConfig({
-    nivelPreferido: nivelStr,
-    modeloPreferido: typeof modeloPreferido === 'string' ? modeloPreferido.trim() : undefined,
-    politicaLimite: typeof politicaLimite === 'string' ? politicaLimite.trim() : undefined,
-    openRouterModeloPreferido:
-      typeof openRouterModeloPreferido === 'string' ? openRouterModeloPreferido.trim() : undefined,
-    limitesPorModelo:
-      limitesPorModelo && typeof limitesPorModelo === 'object' ? limitesPorModelo : undefined,
-  });
-  res.json({
-    exito: true,
-    ...getLastWorkingGeminiInfo({ esMaestro }),
-  });
-});
-
-app.post('/api/gemini/master-control', (req, res) => {
-  if (!esUsuarioMaestroRequest(req)) {
-    res.status(403).json({
-      exito: false,
-      error: `Solo el administrador maestro (${MASTER_ADMIN_EMAIL}) puede habilitar o deshabilitar los modelos pagos.`,
-    });
-    return;
-  }
-
-  const habilitado = req.body?.modelosPagosHabilitados;
-  if (typeof habilitado !== 'boolean') {
-    res.status(400).json({
-      exito: false,
-      error: 'El parámetro booleano modelosPagosHabilitados es obligatorio.',
-    });
-    return;
-  }
-
-  setModelosPagosHabilitados(habilitado, { esMaestro: true });
-  res.json({
-    exito: true,
-    ...getLastWorkingGeminiInfo({ esMaestro: true }),
-  });
-});
-
-app.post('/api/gemini/reset-uso', (req, res) => {
-  const esMaestro = esUsuarioMaestroRequest(req);
-  const { modelo } = req.body || {};
-  resetGeminiUsoDiario(typeof modelo === 'string' ? modelo.trim() : undefined);
-  res.json({
-    exito: true,
-    ...getLastWorkingGeminiInfo({ esMaestro }),
-  });
-});
-
-function obtenerEstadoProceso() {
-  return {
-    pid: process.pid,
-    nodeVersion: process.version,
-    platform: process.platform,
-    uptimeSegundos: Math.round(process.uptime()),
-    nodeEnv: process.env.NODE_ENV || 'no definido',
-    puerto: PORT,
-    clienteSdkInicializado: isModelosPagosHabilitados() ? Boolean(obtenerClienteGeminiActivo()) : false,
-    fuenteClienteActivo: isModelosPagosHabilitados() ? geminiKeySource : 'OPENROUTER_FREE',
-    pliegosEnMemoria: pliegosIndexados.length,
-    timestamp: new Date().toISOString(),
-  };
-}
-
-async function ejecutarDiagnosticoGemini(_req: express.Request, res: express.Response) {
-  const t0 = Date.now();
-  const pagosHabilitados = isModelosPagosHabilitados();
-  if (pagosHabilitados) {
-    const recarga = inicializarGemini();
-    if (recarga.client) {
-      ai = recarga.client;
-      geminiKeySource = recarga.keySource;
-    }
-  }
-
-  const {
-    variablesEntorno,
-    infoApiKey,
-    infoGeminiKey,
-    infoGoogleKey,
-    hayPlantillaIgnorada,
-  } = obtenerResumenVariablesEntorno();
-
-  const openRouterEnv = obtenerResumenOpenRouterEnv();
-  const openRouterKeys = obtenerCandidatosOpenRouterKeys();
-  const candidatosKeys = pagosHabilitados ? obtenerCandidatosApiKeys() : [];
-  const candidatoPrincipal = pagosHabilitados
-    ? infoApiKey.validaParaUso
-      ? infoApiKey
-      : infoGeminiKey.validaParaUso
-        ? infoGeminiKey
-        : infoGoogleKey.validaParaUso
-          ? infoGoogleKey
-          : null
-    : null;
-
-  const partesVarDetectada = candidatosKeys.map(c => `${c.nombre} (${c.vistaSegura})`);
-  if (openRouterEnv.configurado) {
-    partesVarDetectada.push(`${openRouterEnv.nombreVariable} (${openRouterEnv.vistaSegura})`);
-  }
-
-  const variableDetectada =
-    partesVarDetectada.length > 0
-      ? partesVarDetectada.join(' · ')
-      : !pagosHabilitados
-        ? 'Solo modo gratuito (OPENROUTER_API_KEY / GROQ_API_KEY no detectadas)'
-        : infoGeminiKey.esPlantilla
-          ? `GEMINI_API_KEY (${infoGeminiKey.vistaSegura})`
-          : infoApiKey.esPlantilla
-            ? `API_KEY (${infoApiKey.vistaSegura})`
-            : 'Ninguna definida';
-
-  const estadoProceso = obtenerEstadoProceso();
-  const modeloPreferido = getPreferredGeminiModel();
-  const modelosDisponibles = pagosHabilitados
-    ? [...DEFAULT_TEXT_MODELS, OPENROUTER_FREE_MODEL]
-    : [OPENROUTER_FREE_MODEL];
-
-  if (candidatosKeys.length === 0 && !candidatoPrincipal && openRouterKeys.length === 0) {
-    res.json({
-      ok: false,
-      estado: !pagosHabilitados
-        ? 'SOLO_GRATUITO_SIN_CLAVE_OPENROUTER'
-        : hayPlantillaIgnorada
-          ? 'PLANTILLA_NO_REEMPLAZADA'
-          : 'CLAVE_AUSENTE',
-      codigoHttp: null,
-      modelo: pagosHabilitados ? GEMINI_MODEL : OPENROUTER_FREE_MODEL,
-      modeloPreferido,
-      modelosDisponibles,
-      resultadosPorModelo: [] as IntentoModeloResultado[],
-      variableDetectada,
-      latenciaMs: Date.now() - t0,
-      estadoProceso,
-      variablesEntorno: {
-        ...(pagosHabilitados ? variablesEntorno : {}),
-        OPENROUTER_API_KEY: {
-          definida: openRouterEnv.configurado,
-          longitud: openRouterEnv.configurado ? 1 : 0,
-          esPlantilla: false,
-          vistaSegura: openRouterEnv.vistaSegura,
-        },
-      },
-      errorTecnico: {
-        nombre: hayPlantillaIgnorada && pagosHabilitados ? 'PlaceholderApiKeyIgnored' : 'MissingApiKeyError',
-        codigoHttp: null,
-        statusText: !pagosHabilitados ? 'OPENROUTER_KEY_MISSING' : 'ENV_VAR_MISSING',
-        mensaje: !pagosHabilitados
-          ? 'Modo gratuito activo: no se detectó OPENROUTER_API_KEY en el servidor.'
-          : 'No se encontró ninguna clave válida en API_KEY, GEMINI_API_KEY ni OPENROUTER_API_KEY.',
-        causa: null,
-        pingEjecutado: false,
-        stackResumen: null,
-      },
-      detalle: !pagosHabilitados
-        ? 'El sistema opera exclusivamente en modo gratuito ($0). Configura OPENROUTER_API_KEY en Settings > Secrets para probar el motor OpenRouter :free.'
-        : 'No se encontró ninguna clave en API_KEY, GEMINI_API_KEY ni OPENROUTER_API_KEY. Configúrala en Settings > Secrets y recarga el entorno.',
-    });
-    return;
-  }
-
-  // Probar TODOS los modelos habilitados en vivo (Gemini solo si modelosPagosHabilitados === true + OpenRouter :free)
-  const resultadosPorModelo: IntentoModeloResultado[] = [];
-  let ganador: IntentoModeloResultado | null = null;
-  let ultimoErrObj: any = null;
-
-  if (pagosHabilitados) {
-    for (const kc of candidatosKeys) {
-      for (const modeloTest of DEFAULT_TEXT_MODELS) {
-        const mT0 = Date.now();
-        try {
-          const resp = await kc.client.models.generateContent({
-            model: modeloTest,
-            contents: 'Responde únicamente con la palabra: OK',
-            config: {
-              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            },
-          });
-          const txt = (resp.text || '').trim();
-          const item: IntentoModeloResultado = {
-            modelo: modeloTest,
-            fuenteClave: kc.nombre,
-            ok: true,
-            codigoHttp: 200,
-            estado: 'CONECTADA',
-            latenciaMs: Date.now() - mT0,
-            respuestaModelo: txt.slice(0, 60) || '(sin texto)',
-          };
-          resultadosPorModelo.push(item);
-          if (!ganador) ganador = item;
-        } catch (err: any) {
-          ultimoErrObj = err;
-          const infoErr = clasificarErrorGemini(err);
-          resultadosPorModelo.push({
-            modelo: modeloTest,
-            fuenteClave: kc.nombre,
-            ok: false,
-            codigoHttp: infoErr.codigoHttp,
-            estado: infoErr.estado,
-            latenciaMs: Date.now() - mT0,
-            detalleError: infoErr.mensaje.slice(0, 300),
-          });
-        }
-      }
-    }
-  }
-
-  if (openRouterKeys.length > 0) {
-    const orModel = getOpenRouterModeloPreferido();
-    const orT0 = Date.now();
-    try {
-      const orPing = await generarChatOpenRouter({
-        parts: [{ text: 'Responde únicamente con la palabra: OK' }],
-        systemInstruction: 'Responde únicamente con OK.',
-        model: orModel,
-        timeoutMs: 15000,
-      });
-      const itemOr: IntentoModeloResultado = {
-        modelo: orPing.modelUsed || orModel,
-        fuenteClave: orPing.keySourceUsed,
-        ok: true,
-        codigoHttp: 200,
-        estado: 'CONECTADA',
-        latenciaMs: Date.now() - orT0,
-        respuestaModelo: orPing.texto.slice(0, 60) || 'OK',
-      };
-      resultadosPorModelo.push(itemOr);
-      if (!ganador) ganador = itemOr;
-    } catch (errOr: any) {
-      ultimoErrObj = ultimoErrObj || errOr;
-      const infoOr = clasificarErrorOpenRouter(
-        typeof errOr?.status === 'number' ? errOr.status : null,
-        errOr?.message || String(errOr)
-      );
-      resultadosPorModelo.push({
-        modelo: orModel,
-        fuenteClave: openRouterKeys[0].nombre,
-        ok: false,
-        codigoHttp: infoOr.codigoHttp,
-        estado: infoOr.estado,
-        latenciaMs: Date.now() - orT0,
-        detalleError: infoOr.mensaje.slice(0, 300),
-      });
-    }
-  }
-
-  if (ganador) {
-    clearUltimoErrorGemini();
-    const fallidos = resultadosPorModelo.filter(r => !r.ok);
-    const notaParcial =
-      fallidos.length > 0
-        ? ` (${fallidos.map(f => `${f.modelo}: ${f.estado} ${f.codigoHttp || ''}`).join('; ')}; conmutación automática activa hacia ${ganador.modelo}).`
-        : '';
-
-    res.json({
-      ok: true,
-      estado: 'CONECTADA',
-      codigoHttp: 200,
-      modelo: ganador.modelo,
-      modeloPreferido,
-      modelosDisponibles,
-      resultadosPorModelo,
-      variableDetectada,
-      latenciaMs: Date.now() - t0,
-      respuestaModelo: ganador.respuestaModelo,
-      estadoProceso: obtenerEstadoProceso(),
-      variablesEntorno,
-      errorTecnico: null,
-      detalle: `Conexión verificada con ${ganador.modelo} usando ${ganador.fuenteClave}.${notaParcial}`,
-    });
-    return;
-  }
-
-  const ultimoResultado = resultadosPorModelo[resultadosPorModelo.length - 1];
-  const infoUltimo = clasificarErrorGemini(ultimoErrObj);
-  setUltimoErrorGemini(
-    `${infoUltimo.codigoHttp ? `[${infoUltimo.codigoHttp}] ` : ''}${infoUltimo.mensaje}`
-  );
-
-  const es402Todos = resultadosPorModelo.some(r => r.estado === 'CREDITOS_AGOTADOS');
-
-  res.json({
-    ok: false,
-    estado: es402Todos ? 'CREDITOS_AGOTADOS' : ultimoResultado?.estado || infoUltimo.estado,
-    codigoHttp: ultimoResultado?.codigoHttp ?? infoUltimo.codigoHttp,
-    modelo: modelosDisponibles.join(' · '),
-    modeloPreferido,
-    modelosDisponibles,
-    resultadosPorModelo,
-    variableDetectada,
-    latenciaMs: Date.now() - t0,
-    estadoProceso,
-    variablesEntorno,
-    errorTecnico: {
-      nombre: ultimoErrObj?.name || 'Error',
-      codigoHttp: infoUltimo.codigoHttp,
-      statusText: ultimoErrObj?.statusText || null,
-      mensaje: infoUltimo.mensaje.slice(0, 500),
-      causa: ultimoErrObj?.cause ? sanitizarTextoError(ultimoErrObj.cause?.message || ultimoErrObj.cause) : null,
-      pingEjecutado: true,
-      stackResumen:
-        typeof ultimoErrObj?.stack === 'string'
-          ? sanitizarTextoError(ultimoErrObj.stack.split('\n').slice(0, 3).join(' | '))
-          : null,
-    },
-    detalle: es402Todos
-      ? `Se probaron todos los modelos configurados (${modelosDisponibles.join(', ')}), pero la clave activa devolvió HTTP 402 (créditos prepagos agotados en Google AI Studio). Recarga saldo en https://ai.studio/projects o configura otra clave con cuota disponible en Settings > Secrets (GEMINI_API_KEY).`
-      : infoUltimo.mensaje.slice(0, 400),
-  });
-}
-
-// Diagnóstico / ping real a Google Gemini API (GET y POST para uso desde navegador, curl o UI)
-app.get('/api/gemini/diagnostico', ejecutarDiagnosticoGemini);
-app.post('/api/gemini/diagnostico', ejecutarDiagnosticoGemini);
-app.get('/api/gemini/ping', ejecutarDiagnosticoGemini);
-app.post('/api/gemini/ping', ejecutarDiagnosticoGemini);
-
-app.delete('/api/comparador/planos/:rol', (req, res) => {
-  const rol = req.params.rol === 'B' ? 'B' : 'A';
-  planosComparador[rol] = null;
-  eliminarPlanoComparadorDisco(rol);
-  res.json({ exito: true });
-});
-
-app.post('/api/comparador/analizar/stream', async (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders?.();
-
-  const enviar = (payload: Record<string, any>) => {
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
-  };
-
-  try {
-    const { enfoque = 'Auditoría completa de discrepancias entre planos y pliego' } = req.body || {};
-    const planoA = planosComparador.A;
-    const planoB = planosComparador.B;
-
-    if (!planoA) {
-      enviar({
-        error: 'Debes cargar al menos el Plano A en PDF para iniciar la comparación.',
-        done: true,
-      });
-      res.end();
-      return;
-    }
-
-    const parts = await prepararPartesComparacion({
-      planoA,
-      planoB,
-      pliegos: pliegosIndexados,
-      enfoque,
-      ai,
-    });
-
-    let avisoErrorGemini = '';
-    const clienteAi = isModelosPagosHabilitados() ? obtenerClienteGeminiActivo() : null;
-    if (clienteAi) {
-      try {
-        const { stream, modelUsed } = await generarStreamConFallback({
-          ai: clienteAi,
-          contents: { parts },
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
-            systemInstruction:
-              'Eres un Inspector Jefe de Ingeniería Eléctrica 132 kV (Líneas de Alta Tensión y Estaciones Transformadoras). ' +
-              'Tu trabajo es auditar planos en PDF (inspeccionando tanto texto como tablas, rótulos y detalles gráficos) comparando dos planos entre sí y contrastándolos contra los Pliegos de Licitación reales. ' +
-              'Entrega siempre cuadros comparativos claros en tablas Markdown citando valores numéricos exactos, páginas y artículos. Nunca inventes especificaciones.',
-          },
-        });
-
-        let huboTexto = false;
-        for await (const chunk of stream) {
-          const txt = chunk.text;
-          if (txt) {
-            huboTexto = true;
-            enviar({ chunk: txt });
-          }
-        }
-        if (huboTexto) {
-          clearUltimoErrorGemini();
-          enviar({ done: true, fuente: `${modelUsed}-multimodal` });
-          res.end();
-          return;
-        }
-      } catch (geminiErr: any) {
-        console.warn('[Comparador Gemini Error]:', geminiErr?.message || geminiErr);
-        avisoErrorGemini = formatearAvisoErrorGemini(geminiErr);
-      }
-    } else if (isModelosPagosHabilitados()) {
-      avisoErrorGemini = obtenerAvisoSinClienteGemini();
-    }
-
-    const fallbackMd = compararPlanosLocalFallback({
-      planoA,
-      planoB,
-      pliegos: pliegosIndexados,
-      enfoque,
-    });
-    enviar({ chunk: `${avisoErrorGemini}${fallbackMd}`, done: true, fuente: 'comparador-local' });
-    res.end();
-  } catch (err: any) {
-    enviar({ error: err?.message || 'Error ejecutando comparación', done: true });
-    res.end();
-  }
-});
+// Endpoints modulares del Comparador de Planos PDF y Configuración/Diagnóstico Gemini
+app.use('/api/comparador', createComparadorRouter());
+app.use('/api/gemini', createGeminiRouter(PORT));
 
 // 1. Obtener lista de pliegos reales cargados
 app.get('/api/pliegos', (_req, res) => {
   res.json({
     exito: true,
-    pliegos: pliegosIndexados.map(toPliegoResumenCliente),
-    total: pliegosIndexados.length,
+    pliegos: obraState.pliegosIndexados.map(toPliegoResumenCliente),
+    total: obraState.pliegosIndexados.length,
   });
 });
 
@@ -1497,7 +912,7 @@ app.get('/api/pliegos', (_req, res) => {
 app.get('/api/pliegos/:id/texto', (req, res) => {
   try {
     const safeId = sanitizeSafeId(req.params.id, 'pliegoId');
-    const encontrado = pliegosIndexados.find(p => p.id === safeId);
+    const encontrado = obraState.pliegosIndexados.find(p => p.id === safeId);
     if (!encontrado) {
       res.status(404).json({ exito: false, error: 'Pliego no encontrado en caché del servidor' });
       return;
@@ -1534,8 +949,8 @@ app.post('/api/pliegos/cargar', async (req, res) => {
         buffer,
         fechaSubida: pliego.fechaSubida,
       });
-      if (indexado.esEscaneado && ai) {
-        asegurarGeminiFileUri(indexado, ai).catch(() => {});
+      if (indexado.esEscaneado && obraState.ai) {
+        asegurarGeminiFileUri(indexado, obraState.ai).catch(() => {});
       }
     } else {
       indexado = procesarTextoPliego({
@@ -1546,13 +961,13 @@ app.post('/api/pliegos/cargar', async (req, res) => {
       });
     }
 
-    pliegosIndexados = [indexado, ...pliegosIndexados.filter(p => p.id !== indexado.id)];
+    obraState.pliegosIndexados = [indexado, ...obraState.pliegosIndexados.filter(p => p.id !== indexado.id)];
 
     res.json({
       exito: true,
       pliego: toPliegoResumenCliente(indexado),
       mensaje: `Pliego "${indexado.nombre}" indexado en ${indexado.tiempoProcesoMs} ms`,
-      totalPliegos: pliegosIndexados.length,
+      totalPliegos: obraState.pliegosIndexados.length,
     });
   } catch (err: any) {
     const status = err?.status === 400 ? 400 : 500;
@@ -1564,9 +979,9 @@ app.post('/api/pliegos/cargar', async (req, res) => {
 app.delete('/api/pliegos/:id', (req, res) => {
   try {
     const safeId = sanitizeSafeId(req.params.id, 'pliegoId');
-    pliegosIndexados = pliegosIndexados.filter(p => p.id !== safeId);
+    obraState.pliegosIndexados = obraState.pliegosIndexados.filter(p => p.id !== safeId);
     eliminarPliegoDeDisco(safeId);
-    res.json({ exito: true, totalRestantes: pliegosIndexados.length });
+    res.json({ exito: true, totalRestantes: obraState.pliegosIndexados.length });
   } catch (err: any) {
     const status = err?.status === 400 ? 400 : 500;
     res.status(status).json({ exito: false, error: err?.message || 'ID de pliego inválido' });
@@ -1575,7 +990,7 @@ app.delete('/api/pliegos/:id', (req, res) => {
 
 // 4. Limpiar todos los pliegos reales
 app.post('/api/pliegos/limpiar', (_req, res) => {
-  pliegosIndexados = [];
+  obraState.pliegosIndexados = [];
   limpiarPliegosDeDisco();
   res.json({ exito: true, mensaje: 'Pliegos limpiados en el servidor' });
 });
@@ -1587,8 +1002,8 @@ app.post('/api/pliegos/limpiar', (_req, res) => {
 app.get('/api/drive-docs', (_req, res) => {
   res.json({
     exito: true,
-    total: storeDriveDocumentos.length,
-    docs: storeDriveDocumentos.map(d => ({
+    total: obraState.storeDriveDocumentos.length,
+    docs: obraState.storeDriveDocumentos.map(d => ({
       id: d.id,
       driveFileId: d.driveFileId,
       nombre: d.nombre,
@@ -1626,11 +1041,11 @@ app.post('/api/drive-docs/sincronizar', async (req, res) => {
       accessToken,
       folderId,
       ai: obtenerClienteGeminiActivo(),
-      storeActual: storeDriveDocumentos,
+      storeActual: obraState.storeDriveDocumentos,
       maxNuevos,
     });
 
-    storeDriveDocumentos = resultado.storeActualizado;
+    obraState.storeDriveDocumentos = resultado.storeActualizado;
 
     res.json({
       exito: true,
@@ -1638,7 +1053,7 @@ app.post('/api/drive-docs/sincronizar', async (req, res) => {
       nuevos: resultado.nuevos,
       omitidosExistentes: resultado.omitidosExistentes,
       nombresNuevos: resultado.nombresNuevos,
-      docs: storeDriveDocumentos.map(d => ({
+      docs: obraState.storeDriveDocumentos.map(d => ({
         id: d.id,
         driveFileId: d.driveFileId,
         nombre: d.nombre,
@@ -1714,7 +1129,7 @@ app.post('/api/drive/verificar', async (req, res) => {
 app.get('/api/elencos', (_req, res) => {
   res.json({
     exito: true,
-    ...storeElencos,
+    ...obraState.storeElencos,
   });
 });
 
@@ -1742,10 +1157,10 @@ app.post('/api/elencos/sincronizar-drive', async (req, res) => {
       ai: obtenerClienteGeminiActivo(),
     });
 
-    storeElencos = resultado;
+    obraState.storeElencos = resultado;
     res.json({
       exito: true,
-      ...storeElencos,
+      ...obraState.storeElencos,
     });
   } catch (err: any) {
     const status = err?.status === 401 ? 401 : err?.status === 403 ? 403 : 500;
@@ -1764,7 +1179,7 @@ app.post('/api/elencos/sincronizar-drive', async (req, res) => {
 app.get('/api/interferencias', (_req, res) => {
   res.json({
     exito: true,
-    interferencias: storeInterferencias,
+    interferencias: obraState.storeInterferencias,
   });
 });
 
@@ -1776,7 +1191,7 @@ app.post('/api/interferencias/hidratar', (req, res) => {
     const MOCK_IDS = new Set(['INT-1', 'INT-2', 'INT-3', 'INT-4', 'INT-5']);
     const merged = new Map<string, Interferencia>();
 
-    for (const existing of storeInterferencias) {
+    for (const existing of obraState.storeInterferencias) {
       if (existing?.id && !MOCK_IDS.has(existing.id)) {
         merged.set(existing.id, existing);
       }
@@ -1787,13 +1202,13 @@ app.post('/api/interferencias/hidratar', (req, res) => {
       merged.set(key, item);
     }
 
-    storeInterferencias = Array.from(merged.values());
-    guardarStoreInterferencias(storeInterferencias);
+    obraState.storeInterferencias = Array.from(merged.values());
+    guardarStoreInterferencias(obraState.storeInterferencias);
 
     res.json({
       exito: true,
-      total: storeInterferencias.length,
-      interferencias: storeInterferencias,
+      total: obraState.storeInterferencias.length,
+      interferencias: obraState.storeInterferencias,
     });
   } catch (err: any) {
     res.status(500).json({ exito: false, error: err?.message || 'Error hidratando interferencias.' });
@@ -1818,14 +1233,14 @@ app.post('/api/interferencias/sincronizar-drive', async (req, res) => {
     const syncRes = await sincronizarInterferenciasDesdeGoogleDrive({
       accessToken,
       folderId: folderId ? String(folderId).trim() : DEFAULT_DRIVE_ROOT_FOLDER_ID,
-      interferenciasExistentes: storeInterferencias,
+      interferenciasExistentes: obraState.storeInterferencias,
       forzarRelectura: Boolean(forzarRelectura),
       ai: clienteAi,
       model: GEMINI_MODEL,
     });
 
-    storeInterferencias = syncRes.interferencias;
-    guardarStoreInterferencias(storeInterferencias);
+    obraState.storeInterferencias = syncRes.interferencias;
+    guardarStoreInterferencias(obraState.storeInterferencias);
 
     res.json({
       exito: true,
@@ -1851,8 +1266,8 @@ app.post('/api/interferencias/sincronizar-drive', async (req, res) => {
 app.get('/api/notas-libro', (_req, res) => {
   res.json({
     exito: true,
-    notasLibro: storeNotasLibro,
-    total: storeNotasLibro.length,
+    notasLibro: obraState.storeNotasLibro,
+    total: obraState.storeNotasLibro.length,
   });
 });
 
@@ -1874,15 +1289,15 @@ app.post('/api/notas-libro/sincronizar-drive', async (req, res) => {
     const syncRes = await sincronizarNotasLibroDesdeGoogleDrive({
       accessToken,
       folderId: folderId ? String(folderId).trim() : DEFAULT_DRIVE_ROOT_FOLDER_ID,
-      notasExistentes: storeNotasLibro,
+      notasExistentes: obraState.storeNotasLibro,
       forzarRelectura: Boolean(forzarRelectura),
       continuarLote: Boolean(continuarLote),
       ai: clienteAi,
       model: GEMINI_MODEL,
     });
 
-    storeNotasLibro = syncRes.notasLibro;
-    guardarStoreNotasLibro(storeNotasLibro);
+    obraState.storeNotasLibro = syncRes.notasLibro;
+    guardarStoreNotasLibro(obraState.storeNotasLibro);
 
     res.json({
       exito: true,
@@ -1921,11 +1336,11 @@ app.post('/api/notas-libro/registrar', async (req, res) => {
       model: GEMINI_MODEL,
     });
 
-    storeNotasLibro = recalcularHilosYRespuestas([procesada, ...storeNotasLibro]);
-    guardarStoreNotasLibro(storeNotasLibro);
+    obraState.storeNotasLibro = recalcularHilosYRespuestas([procesada, ...obraState.storeNotasLibro]);
+    guardarStoreNotasLibro(obraState.storeNotasLibro);
 
-    const notaFinal = storeNotasLibro.find(n => n.id === notaId) || procesada;
-    res.json({ exito: true, nota: notaFinal, notasLibro: storeNotasLibro });
+    const notaFinal = obraState.storeNotasLibro.find(n => n.id === notaId) || procesada;
+    res.json({ exito: true, nota: notaFinal, notasLibro: obraState.storeNotasLibro });
   } catch (err: any) {
     res.status(500).json({ exito: false, error: err?.message || 'Error registrando nota.' });
   }
@@ -1938,30 +1353,30 @@ app.post('/api/notas-libro/hidratar', (req, res) => {
     if (incoming.length === 0) {
       res.json(
         compact
-          ? { exito: true, total: storeNotasLibro.length }
-          : { exito: true, total: storeNotasLibro.length, notasLibro: storeNotasLibro }
+          ? { exito: true, total: obraState.storeNotasLibro.length }
+          : { exito: true, total: obraState.storeNotasLibro.length, notasLibro: obraState.storeNotasLibro }
       );
       return;
     }
 
     const merged = new Map<string, NotaLibro>();
-    for (const existing of storeNotasLibro) {
+    for (const existing of obraState.storeNotasLibro) {
       if (existing?.id) merged.set(existing.id, existing);
     }
     for (const item of incoming) {
       if (item?.id) merged.set(item.id, item);
     }
 
-    storeNotasLibro = recalcularHilosYRespuestas(Array.from(merged.values()));
-    guardarStoreNotasLibro(storeNotasLibro);
+    obraState.storeNotasLibro = recalcularHilosYRespuestas(Array.from(merged.values()));
+    guardarStoreNotasLibro(obraState.storeNotasLibro);
 
     res.json(
       compact
-        ? { exito: true, total: storeNotasLibro.length }
+        ? { exito: true, total: obraState.storeNotasLibro.length }
         : {
             exito: true,
-            total: storeNotasLibro.length,
-            notasLibro: storeNotasLibro,
+            total: obraState.storeNotasLibro.length,
+            notasLibro: obraState.storeNotasLibro,
           }
     );
   } catch (err: any) {
@@ -1971,13 +1386,13 @@ app.post('/api/notas-libro/hidratar', (req, res) => {
 
 app.patch('/api/notas-libro/:id', (req, res) => {
   const { id } = req.params;
-  const idx = storeNotasLibro.findIndex(n => n.id === id);
+  const idx = obraState.storeNotasLibro.findIndex(n => n.id === id);
   if (idx === -1) {
     res.status(404).json({ exito: false, error: 'Nota de libro no encontrada.' });
     return;
   }
 
-  const actual = storeNotasLibro[idx];
+  const actual = obraState.storeNotasLibro[idx];
   const body = req.body || {};
 
   const emisorActualizado: ActorNotaLibro =
@@ -2023,28 +1438,28 @@ app.patch('/api/notas-libro/:id', (req, res) => {
     manualOverride: true,
   };
 
-  const reemplazo = storeNotasLibro.map((n, i) => (i === idx ? actualizada : n));
-  storeNotasLibro = recalcularHilosYRespuestas(reemplazo);
-  guardarStoreNotasLibro(storeNotasLibro);
+  const reemplazo = obraState.storeNotasLibro.map((n, i) => (i === idx ? actualizada : n));
+  obraState.storeNotasLibro = recalcularHilosYRespuestas(reemplazo);
+  guardarStoreNotasLibro(obraState.storeNotasLibro);
 
-  const notaFinal = storeNotasLibro.find(n => n.id === id) || actualizada;
+  const notaFinal = obraState.storeNotasLibro.find(n => n.id === id) || actualizada;
   res.json({
     exito: true,
     nota: notaFinal,
-    notasLibro: storeNotasLibro,
+    notasLibro: obraState.storeNotasLibro,
   });
 });
 
 app.delete('/api/notas-libro/:id', (req, res) => {
   const { id } = req.params;
-  storeNotasLibro = recalcularHilosYRespuestas(storeNotasLibro.filter(n => n.id !== id));
-  guardarStoreNotasLibro(storeNotasLibro);
-  res.json({ exito: true, notasLibro: storeNotasLibro });
+  obraState.storeNotasLibro = recalcularHilosYRespuestas(obraState.storeNotasLibro.filter(n => n.id !== id));
+  guardarStoreNotasLibro(obraState.storeNotasLibro);
+  res.json({ exito: true, notasLibro: obraState.storeNotasLibro });
 });
 
 app.post('/api/notas-libro/limpiar', (_req, res) => {
-  storeNotasLibro = [];
-  guardarStoreNotasLibro(storeNotasLibro);
+  obraState.storeNotasLibro = [];
+  guardarStoreNotasLibro(obraState.storeNotasLibro);
   res.json({ exito: true });
 });
 
@@ -2055,9 +1470,9 @@ app.post('/api/notas-libro/limpiar', (_req, res) => {
 app.get('/api/minutas', (_req, res) => {
   res.json({
     exito: true,
-    minutas: storeMinutas.minutas,
-    compromisos: storeMinutas.compromisos,
-    notasPedido: storeMinutas.notasPedido,
+    minutas: obraState.storeMinutas.minutas,
+    compromisos: obraState.storeMinutas.compromisos,
+    notasPedido: obraState.storeMinutas.notasPedido,
   });
 });
 
@@ -2201,27 +1616,27 @@ app.post('/api/minutas/hidratar', (req, res) => {
       : [];
 
     const mMap = new Map<string, MinutaReunion>();
-    for (const m of storeMinutas.minutas) if (m?.id) mMap.set(m.id, m);
+    for (const m of obraState.storeMinutas.minutas) if (m?.id) mMap.set(m.id, m);
     for (const m of incomingMinutas) if (m?.id) mMap.set(m.id, m);
 
     const cMap = new Map<string, CompromisoMinuta>();
-    for (const c of storeMinutas.compromisos) if (c?.id) cMap.set(c.id, c);
+    for (const c of obraState.storeMinutas.compromisos) if (c?.id) cMap.set(c.id, c);
     for (const c of incomingCompromisos) if (c?.id) cMap.set(c.id, c);
 
     const npMap = new Map<string, NotaPedidoIngenieria>();
-    for (const n of storeMinutas.notasPedido) if (n?.id) npMap.set(n.id, n);
+    for (const n of obraState.storeMinutas.notasPedido) if (n?.id) npMap.set(n.id, n);
     for (const n of incomingNotasPedido) if (n?.id) npMap.set(n.id, n);
 
-    storeMinutas = {
+    obraState.storeMinutas = {
       minutas: Array.from(mMap.values()),
       compromisos: Array.from(cMap.values()),
       notasPedido: Array.from(npMap.values()),
     };
-    guardarStoreMinutas(storeMinutas);
+    guardarStoreMinutas(obraState.storeMinutas);
 
     res.json({
       exito: true,
-      ...storeMinutas,
+      ...obraState.storeMinutas,
     });
   } catch (err: any) {
     res.status(500).json({ exito: false, error: err?.message || 'Error hidratando minutas.' });
@@ -2247,27 +1662,27 @@ app.post('/api/minutas/sincronizar-drive', async (req, res) => {
       accessToken,
       folderId: folderId ? String(folderId).trim() : DEFAULT_DRIVE_ROOT_FOLDER_ID,
       buscarEnTodoDrive: Boolean(buscarEnTodoDrive),
-      minutasExistentes: storeMinutas.minutas,
+      minutasExistentes: obraState.storeMinutas.minutas,
       ai: clienteAi,
       model: GEMINI_MODEL,
     });
 
     if (syncRes.minutasNuevas.length > 0 || syncRes.minutasActualizadas > 0) {
       const nuevasMap = new Map(syncRes.minutasNuevas.map(m => [m.id, m]));
-      const filtradas = storeMinutas.minutas.filter(m => !nuevasMap.has(m.id));
-      storeMinutas.minutas = [...syncRes.minutasNuevas, ...filtradas];
+      const filtradas = obraState.storeMinutas.minutas.filter(m => !nuevasMap.has(m.id));
+      obraState.storeMinutas.minutas = [...syncRes.minutasNuevas, ...filtradas];
       if (syncRes.compromisosNuevos.length > 0) {
-        storeMinutas.compromisos = [...syncRes.compromisosNuevos, ...storeMinutas.compromisos];
+        obraState.storeMinutas.compromisos = [...syncRes.compromisosNuevos, ...obraState.storeMinutas.compromisos];
       }
-      guardarStoreMinutas(storeMinutas);
+      guardarStoreMinutas(obraState.storeMinutas);
     }
 
     res.json({
       exito: true,
       ...syncRes,
-      minutas: storeMinutas.minutas,
-      compromisos: storeMinutas.compromisos,
-      notasPedido: storeMinutas.notasPedido,
+      minutas: obraState.storeMinutas.minutas,
+      compromisos: obraState.storeMinutas.compromisos,
+      notasPedido: obraState.storeMinutas.notasPedido,
     });
   } catch (err: any) {
     const status = err?.status === 401 || err?.status === 403 ? err.status : 500;
@@ -2370,9 +1785,9 @@ app.post('/api/minutas/registrar', async (req, res) => {
       fuenteExtraccion = analisis.fuente;
     }
 
-    storeMinutas.minutas = [nuevaMinuta, ...storeMinutas.minutas];
-    storeMinutas.compromisos = [...nuevosCompromisos, ...storeMinutas.compromisos];
-    guardarStoreMinutas(storeMinutas);
+    obraState.storeMinutas.minutas = [nuevaMinuta, ...obraState.storeMinutas.minutas];
+    obraState.storeMinutas.compromisos = [...nuevosCompromisos, ...obraState.storeMinutas.compromisos];
+    guardarStoreMinutas(obraState.storeMinutas);
 
     res.json({
       exito: true,
@@ -2388,9 +1803,9 @@ app.post('/api/minutas/registrar', async (req, res) => {
 
 app.delete('/api/minutas/:id', (req, res) => {
   const { id } = req.params;
-  storeMinutas.minutas = storeMinutas.minutas.filter(m => m.id !== id);
-  storeMinutas.compromisos = storeMinutas.compromisos.filter(c => c.minutaId !== id);
-  guardarStoreMinutas(storeMinutas);
+  obraState.storeMinutas.minutas = obraState.storeMinutas.minutas.filter(m => m.id !== id);
+  obraState.storeMinutas.compromisos = obraState.storeMinutas.compromisos.filter(c => c.minutaId !== id);
+  guardarStoreMinutas(obraState.storeMinutas);
   res.json({ exito: true });
 });
 
@@ -2416,7 +1831,7 @@ app.post('/api/minutas/compromisos', (req, res) => {
       return;
     }
 
-    const minutaAsociada = storeMinutas.minutas.find(m => m.id === minutaId);
+    const minutaAsociada = obraState.storeMinutas.minutas.find(m => m.id === minutaId);
     const hoyIso = new Date().toISOString().split('T')[0];
     const fechaLimIso = normalizarFechaIso(fechaLimite, hoyIso);
     const estadoFinal: EstadoCompromiso =
@@ -2427,7 +1842,7 @@ app.post('/api/minutas/compromisos', (req, res) => {
       minutaId: minutaAsociada?.id || minutaId || 'sin-minuta',
       minutaCodigo: minutaAsociada?.codigo || minutaCodigo || 'REG-DIRECTO',
       minutaFecha: minutaAsociada?.fechaReunion || normalizarFechaIso(minutaFecha, hoyIso),
-      numeroItem: String(numeroItem || `C-${String(storeMinutas.compromisos.length + 1).padStart(2, '0')}`).trim(),
+      numeroItem: String(numeroItem || `C-${String(obraState.storeMinutas.compromisos.length + 1).padStart(2, '0')}`).trim(),
       descripcion: String(descripcion).trim(),
       responsable: String(responsable || 'Ingeniería / Proyectista').trim(),
       area: String(area || 'Ingeniería').trim(),
@@ -2441,8 +1856,8 @@ app.post('/api/minutas/compromisos', (req, res) => {
       notasPedidoIds: [],
     };
 
-    storeMinutas.compromisos = [nuevo, ...storeMinutas.compromisos];
-    guardarStoreMinutas(storeMinutas);
+    obraState.storeMinutas.compromisos = [nuevo, ...obraState.storeMinutas.compromisos];
+    guardarStoreMinutas(obraState.storeMinutas);
     res.json({ exito: true, compromiso: nuevo });
   } catch (err: any) {
     res.status(500).json({ exito: false, error: err?.message || 'Error creando compromiso.' });
@@ -2451,13 +1866,13 @@ app.post('/api/minutas/compromisos', (req, res) => {
 
 app.patch('/api/minutas/compromisos/:id', (req, res) => {
   const { id } = req.params;
-  const idx = storeMinutas.compromisos.findIndex(c => c.id === id);
+  const idx = obraState.storeMinutas.compromisos.findIndex(c => c.id === id);
   if (idx === -1) {
     res.status(404).json({ exito: false, error: 'Compromiso no encontrado.' });
     return;
   }
 
-  const actual = storeMinutas.compromisos[idx];
+  const actual = obraState.storeMinutas.compromisos[idx];
   const body = req.body || {};
   const actualizado: CompromisoMinuta = {
     ...actual,
@@ -2469,15 +1884,15 @@ app.patch('/api/minutas/compromisos/:id', (req, res) => {
     ...(body.frente !== undefined ? { frente: String(body.frente).trim() } : {}),
   };
 
-  storeMinutas.compromisos[idx] = actualizado;
-  guardarStoreMinutas(storeMinutas);
+  obraState.storeMinutas.compromisos[idx] = actualizado;
+  guardarStoreMinutas(obraState.storeMinutas);
   res.json({ exito: true, compromiso: actualizado });
 });
 
 app.delete('/api/minutas/compromisos/:id', (req, res) => {
   const { id } = req.params;
-  storeMinutas.compromisos = storeMinutas.compromisos.filter(c => c.id !== id);
-  guardarStoreMinutas(storeMinutas);
+  obraState.storeMinutas.compromisos = obraState.storeMinutas.compromisos.filter(c => c.id !== id);
+  guardarStoreMinutas(obraState.storeMinutas);
   res.json({ exito: true });
 });
 
@@ -2503,7 +1918,7 @@ app.post('/api/minutas/nota-pedido/generar', async (req, res) => {
       return;
     }
 
-    const seleccionados = storeMinutas.compromisos.filter(c => compromisoIds.includes(c.id));
+    const seleccionados = obraState.storeMinutas.compromisos.filter(c => compromisoIds.includes(c.id));
     if (seleccionados.length === 0) {
       res.status(404).json({
         exito: false,
@@ -2513,7 +1928,7 @@ app.post('/api/minutas/nota-pedido/generar', async (req, res) => {
     }
 
     const fechaHoyIso = normalizarFechaIso(fechaEmision, new Date().toISOString().split('T')[0]);
-    const consecutivo = String(storeMinutas.notasPedido.length + 1).padStart(3, '0');
+    const consecutivo = String(obraState.storeMinutas.notasPedido.length + 1).padStart(3, '0');
     const numeroFinal = String(numeroNota || `NP-ING-${consecutivo}`).trim();
     const emisorFinal = String(emisor || 'Dirección Técnica & Control de Proyecto (UTE)').trim();
     const destinatarioFinal = String(destinatario || 'Jefatura de Ingeniería / Proyectista').trim();
@@ -2534,8 +1949,8 @@ app.post('/api/minutas/nota-pedido/generar', async (req, res) => {
       plazoDescargoDias: plazoFinal,
       encuadreAdicional: encuadreAdicional ? String(encuadreAdicional).trim() : '',
       compromisos: seleccionados,
-      minutas: storeMinutas.minutas,
-      pliegos: pliegosIndexados,
+      minutas: obraState.storeMinutas.minutas,
+      pliegos: obraState.pliegosIndexados,
       ai: clienteAi,
       model: GEMINI_MODEL,
     });
@@ -2556,7 +1971,7 @@ app.post('/api/minutas/nota-pedido/generar', async (req, res) => {
     };
 
     // Marcar compromisos incluidos como INCUMPLIDO (si no estaban cumplidos) y vincular Nota de Pedido
-    storeMinutas.compromisos = storeMinutas.compromisos.map(c => {
+    obraState.storeMinutas.compromisos = obraState.storeMinutas.compromisos.map(c => {
       if (!compromisoIds.includes(c.id)) return c;
       return {
         ...c,
@@ -2565,13 +1980,13 @@ app.post('/api/minutas/nota-pedido/generar', async (req, res) => {
       };
     });
 
-    storeMinutas.notasPedido = [nota, ...storeMinutas.notasPedido];
-    guardarStoreMinutas(storeMinutas);
+    obraState.storeMinutas.notasPedido = [nota, ...obraState.storeMinutas.notasPedido];
+    guardarStoreMinutas(obraState.storeMinutas);
 
     res.json({
       exito: true,
       notaPedido: nota,
-      compromisosActualizados: storeMinutas.compromisos,
+      compromisosActualizados: obraState.storeMinutas.compromisos,
     });
   } catch (err: any) {
     console.error('[Minutas] Error generando Nota de Pedido:', err);
@@ -2581,8 +1996,8 @@ app.post('/api/minutas/nota-pedido/generar', async (req, res) => {
 
 app.delete('/api/minutas/notas-pedido/:id', (req, res) => {
   const { id } = req.params;
-  storeMinutas.notasPedido = storeMinutas.notasPedido.filter(n => n.id !== id);
-  guardarStoreMinutas(storeMinutas);
+  obraState.storeMinutas.notasPedido = obraState.storeMinutas.notasPedido.filter(n => n.id !== id);
+  guardarStoreMinutas(obraState.storeMinutas);
   res.json({ exito: true });
 });
 
@@ -2595,18 +2010,20 @@ app.post('/api/informes/generar', async (req, res) => {
     const {
       solicitud = 'Informe Ejecutivo Semanal de Estado General',
       planos = [],
-      totalPlanificados = storeElencos.totalPlanificados || 543,
+      totalPlanificados = obraState.storeElencos.totalPlanificados || 543,
       hitos = [],
       interferencias = [],
       notasCampo = '',
       fotosCount = 0,
       audiosCount = 0,
+      fotosDetalle = [],
     } = req.body || {};
 
     const planosList = Array.isArray(planos) ? planos : [];
     const hitosList = Array.isArray(hitos) ? hitos : [];
     const interfList =
-      Array.isArray(interferencias) && interferencias.length > 0 ? interferencias : storeInterferencias;
+      Array.isArray(interferencias) && interferencias.length > 0 ? interferencias : obraState.storeInterferencias;
+    const fotosList = Array.isArray(fotosDetalle) ? fotosDetalle.slice(0, 20) : [];
 
     const totalEmitidos = planosList.length;
     const totalApc = planosList.filter((p: any) => Boolean(p?.selloApc)).length;
@@ -2615,10 +2032,10 @@ app.post('/api/informes/generar', async (req, res) => {
       const f = String(p?.fechaDocumento || p?.fechaSubida || p?.fecha || '').slice(0, 10);
       if (/^\d{4}-\d{2}-\d{2}$/.test(f)) fechasCandidatas.push(f);
     }
-    for (const m of storeMinutas.minutas) {
+    for (const m of obraState.storeMinutas.minutas) {
       if (/^\d{4}-\d{2}-\d{2}$/.test(m.fechaReunion)) fechasCandidatas.push(m.fechaReunion);
     }
-    for (const n of storeNotasLibro) {
+    for (const n of obraState.storeNotasLibro) {
       if (/^\d{4}-\d{2}-\d{2}$/.test(n.fecha)) fechasCandidatas.push(n.fecha);
     }
     fechasCandidatas.sort();
@@ -2638,12 +2055,22 @@ app.post('/api/informes/generar', async (req, res) => {
       )
       .join('\n');
 
-    const incumplidos = storeMinutas.compromisos.filter(c => c.estado === 'INCUMPLIDO');
-    const notasSinResp = storeNotasLibro.filter(
+    const resumenFotosCampo = fotosList
+      .map((ft: any) => {
+        const nombre = String(ft?.nombre || 'Foto de obra').slice(0, 80);
+        const frente = String(ft?.frente || '').slice(0, 60);
+        const fecha = String(ft?.fecha || '').slice(0, 30);
+        const analisis = String(ft?.analisisIA || '').replace(/\s+/g, ' ').slice(0, 220);
+        return `- **${nombre}**${frente ? ` (${frente})` : ''}${fecha ? ` [${fecha}]` : ''}${analisis ? `: ${analisis}` : ''}`;
+      })
+      .join('\n');
+
+    const incumplidos = obraState.storeMinutas.compromisos.filter(c => c.estado === 'INCUMPLIDO');
+    const notasSinResp = obraState.storeNotasLibro.filter(
       n => n.estadoRespuesta === 'SIN_RESPUESTA' || n.estadoRespuesta === 'CON_DISCREPANCIA'
     );
 
-    const resumenNotasLibro = storeNotasLibro
+    const resumenNotasLibro = obraState.storeNotasLibro
       .slice(0, 20)
       .map(
         n =>
@@ -2662,14 +2089,15 @@ app.post('/api/informes/generar', async (req, res) => {
           `- Planos planificados totales: ${totalPlanificados}\n` +
           `- Planos emitidos en catálogo: ${totalEmitidos} (${totalPlanificados > 0 ? ((totalEmitidos / totalPlanificados) * 100).toFixed(1) : '0.0'}%)\n` +
           `- Planos con Sello APC (Apto Para Construcción): ${totalApc} (${totalPlanificados > 0 ? ((totalApc / totalPlanificados) * 100).toFixed(1) : '0.0'}%)\n` +
-          `- Pliegos contractuales reales indexados: ${pliegosIndexados.map(p => `${p.nombre} (${p.paginas} págs)`).join(', ') || 'Ninguno'}\n` +
+          `- Pliegos contractuales reales indexados: ${obraState.pliegosIndexados.map(p => `${p.nombre} (${p.paginas} págs)`).join(', ') || 'Ninguno'}\n` +
           `- Hitos contractuales activos (${hitosList.length}):\n${resumenHitos || 'Sin hitos cargados'}\n\n` +
           `- Interferencias y Cruces reales de Drive (${interfList.length}):\n${resumenInterf || 'Sin interferencias sincronizadas'}\n\n` +
-          `- Libro de Comunicaciones (${storeNotasLibro.length} notas, ${notasSinResp.length} pendientes/con discrepancia):\n${resumenNotasLibro || 'Sin notas de libro cargadas'}\n\n` +
-          `- Minutas y Compromisos (${storeMinutas.minutas.length} minutas, ${storeMinutas.compromisos.length} compromisos, ${incumplidos.length} incumplidos, ${storeMinutas.notasPedido.length} Notas de Pedido generadas).\n` +
+          `- Libro de Comunicaciones (${obraState.storeNotasLibro.length} notas, ${notasSinResp.length} pendientes/con discrepancia):\n${resumenNotasLibro || 'Sin notas de libro cargadas'}\n\n` +
+          `- Minutas y Compromisos (${obraState.storeMinutas.minutas.length} minutas, ${obraState.storeMinutas.compromisos.length} compromisos, ${incumplidos.length} incumplidos, ${obraState.storeMinutas.notasPedido.length} Notas de Pedido generadas).\n` +
           `- Relevamiento de Campo: ${fotosCount} fotos, ${audiosCount} audios.\n` +
+          (resumenFotosCampo ? `Evidencia fotográfica de campo:\n${resumenFotosCampo}\n\n` : '') +
           (notasCampo ? `Notas recientes de campo:\n${String(notasCampo).slice(0, 3500)}\n\n` : '') +
-          `Estructura solicitada: Título claro, Resumen Ejecutivo con tabla de KPIs, Estado de Ingeniería y Planos APC, Seguimiento de Hitos Críticos, Gestión de Cruces/Interferencias reales (sin inventar datos), Estado de Notas de Libro y Compromisos de Minuta, y Plan de Acción Inmediato. No inventes datos fuera de las métricas aportadas.`;
+          `Estructura solicitada: Título claro, Resumen Ejecutivo con tabla de KPIs, Estado de Ingeniería y Planos APC, Seguimiento de Hitos Críticos, Gestión de Cruces/Interferencias reales (sin inventar datos), Estado de Notas de Libro y Compromisos de Minuta, Relevamiento y Evidencia de Campo, y Plan de Acción Inmediato. No inventes datos fuera de las métricas aportadas.`;
 
         const { response: resp, modelUsed } = await generarContenidoConFallback({
           ai: clienteAi,
@@ -2706,14 +2134,15 @@ app.post('/api/informes/generar', async (req, res) => {
       `| Planos Emitidos en Catálogo | ${totalEmitidos} | ${totalPlanificados > 0 ? ((totalEmitidos / totalPlanificados) * 100).toFixed(1) : '0.0'}% |\n` +
       `| Planos con Sello APC | ${totalApc} | ${totalPlanificados > 0 ? ((totalApc / totalPlanificados) * 100).toFixed(1) : '0.0'}% |\n` +
       `| Cruces / Interferencias Activas | ${interfList.length} | - |\n` +
-      `| Notas de Libro Indexadas | ${storeNotasLibro.length} (${notasSinResp.length} pendientes/discrepancias) | - |\n` +
-      `| Compromisos de Minuta Incumplidos | ${incumplidos.length} de ${storeMinutas.compromisos.length} | - |\n\n` +
+      `| Notas de Libro Indexadas | ${obraState.storeNotasLibro.length} (${notasSinResp.length} pendientes/discrepancias) | - |\n` +
+      `| Compromisos de Minuta Incumplidos | ${incumplidos.length} de ${obraState.storeMinutas.compromisos.length} | - |\n\n` +
       `## 2. Estado de Interferencias y Cruces Reales\n\n` +
       (resumenInterf || '- Sin cruces sincronizados desde Google Drive.') +
       `\n\n## 3. Hitos Contractuales\n\n` +
       (resumenHitos || '- Sin hitos registrados.') +
       `\n\n## 4. Seguimiento de Notas de Libro y Campo\n\n` +
       (resumenNotasLibro || '- Sin notas de libro cargadas.') +
+      (resumenFotosCampo ? `\n\n### Evidencia Fotográfica de Campo (${fotosList.length} registradas)\n${resumenFotosCampo}` : '') +
       (notasCampo ? `\n\n### Notas de Inspección de Campo (${fotosCount} fotos, ${audiosCount} audios)\n${String(notasCampo).slice(0, 2000)}` : '');
 
     res.json({
@@ -2736,8 +2165,8 @@ app.post('/api/anotador/auditar', async (req, res) => {
     }
 
     const recuperado =
-      pliegosIndexados.length > 0 ? recuperarFragmentosRelevantes(queryStr, pliegosIndexados, 45000) : null;
-    const localRef = buscarYExtraerDePliegosReales(queryStr, pliegosIndexados);
+      obraState.pliegosIndexados.length > 0 ? recuperarFragmentosRelevantes(queryStr, obraState.pliegosIndexados, 45000) : null;
+    const localRef = buscarYExtraerDePliegosReales(queryStr, obraState.pliegosIndexados);
 
     const clienteAi = isModelosPagosHabilitados() ? obtenerClienteGeminiActivo() : null;
     if (clienteAi || (!isModelosPagosHabilitados() && tieneOpenRouterConfigurado())) {
@@ -3152,8 +2581,8 @@ async function prepararContenidoConsulta(
 
   const analisisSemantico = analizarYExpandirConsulta(mensaje, historialTexto);
   const { consultaCombinada } = extraerTerminosBusquedaDrive(mensaje, historialTexto);
-  const recuperado = recuperarFragmentosRelevantes(consultaCombinada, pliegosIndexados, 160000);
-  const escaneados = pliegosIndexados.filter(p => p.esEscaneado);
+  const recuperado = recuperarFragmentosRelevantes(consultaCombinada, obraState.pliegosIndexados, 160000);
+  const escaneados = obraState.pliegosIndexados.filter(p => p.esEscaneado);
 
   // Búsqueda en caché local + búsqueda en vivo en Google Drive (Memorias Descriptivas, Estudios de Suelos, Especificaciones, etc.)
   const driveRes = await buscarYLeerDocumentosDriveEnVivo({
@@ -3161,16 +2590,16 @@ async function prepararContenidoConsulta(
     historial: historialTexto,
     accessToken: driveOptions?.accessToken,
     rootFolderId: driveOptions?.folderId,
-    ai,
-    storeActual: storeDriveDocumentos,
+    ai: obraState.ai,
+    storeActual: obraState.storeDriveDocumentos,
   });
-  storeDriveDocumentos = driveRes.storeActualizado;
+  obraState.storeDriveDocumentos = driveRes.storeActualizado;
 
   const parts: any[] = [];
 
-  if (ai && escaneados.length > 0) {
+  if (obraState.ai && escaneados.length > 0) {
     for (const pEsc of escaneados) {
-      const uri = await asegurarGeminiFileUri(pEsc, ai);
+      const uri = await asegurarGeminiFileUri(pEsc, obraState.ai);
       if (uri) {
         parts.push({
           fileData: {
@@ -3184,8 +2613,8 @@ async function prepararContenidoConsulta(
 
   // Inventario explícito y verificable para evitar confundir Pliegos/Catálogo con Memorias no cargadas
   const notasLibroFuente: NotaLibro[] =
-    storeNotasLibro.length > 0
-      ? storeNotasLibro
+    obraState.storeNotasLibro.length > 0
+      ? obraState.storeNotasLibro
       : Array.isArray(contextoObra?.notasLibro)
         ? (contextoObra.notasLibro as NotaLibro[])
         : Array.isArray(contextoObra?.notasLibroResumen)
@@ -3193,19 +2622,19 @@ async function prepararContenidoConsulta(
           : [];
 
   const listaPliegosCargados =
-    pliegosIndexados.length > 0
-      ? pliegosIndexados.map(p => `${p.nombre} (${p.paginas} págs)`).join(' | ')
+    obraState.pliegosIndexados.length > 0
+      ? obraState.pliegosIndexados.map(p => `${p.nombre} (${p.paginas} págs)`).join(' | ')
       : '(ninguno cargado)';
   const listaDocsDrive =
-    storeDriveDocumentos.length > 0
-      ? storeDriveDocumentos
+    obraState.storeDriveDocumentos.length > 0
+      ? obraState.storeDriveDocumentos
           .slice(0, 30)
           .map(d => `${d.nombre} [${d.rutaCarpeta}, ${d.paginas} págs]`)
           .join(' | ')
       : '(ninguno indexado todavía)';
   const listaAdjuntosChat =
-    chatAdjuntos.length > 0
-      ? chatAdjuntos.map(a => `${a.nombre} (${a.paginas} págs)`).join(' | ')
+    obraState.chatAdjuntos.length > 0
+      ? obraState.chatAdjuntos.map(a => `${a.nombre} (${a.paginas} págs)`).join(' | ')
       : '(ninguno)';
   const estadoDriveVivo = driveOptions?.accessToken
     ? driveRes.errorDrive
@@ -3218,13 +2647,13 @@ async function prepararContenidoConsulta(
   parts.push({
     text:
       `INVENTARIO REAL DE DOCUMENTOS DISPONIBLES EN ESTA CONSULTA:\n` +
-      `- Pliegos Reales indexados (${pliegosIndexados.length}): ${listaPliegosCargados}\n` +
-      `- Documentos Técnicos / Memorias Descriptivas de Google Drive indexados (${storeDriveDocumentos.length}): ${listaDocsDrive}\n` +
+      `- Pliegos Reales indexados (${obraState.pliegosIndexados.length}): ${listaPliegosCargados}\n` +
+      `- Documentos Técnicos / Memorias Descriptivas de Google Drive indexados (${obraState.storeDriveDocumentos.length}): ${listaDocsDrive}\n` +
       `- Búsqueda en vivo en Google Drive: ${estadoDriveVivo}\n` +
-      `- PDFs adjuntos en el Chat (${chatAdjuntos.length}): ${listaAdjuntosChat}\n` +
+      `- PDFs adjuntos en el Chat (${obraState.chatAdjuntos.length}): ${listaAdjuntosChat}\n` +
       `- Notas de Libro de Comunicaciones (${notasLibroFuente.length})\n` +
-      `- Minutas de Reunión (${storeMinutas.minutas.length})\n` +
-      `- Planos PDF en Comparador: A=${planosComparador.A?.nombre || 'ninguno'}, B=${planosComparador.B?.nombre || 'ninguno'}\n` +
+      `- Minutas de Reunión (${obraState.storeMinutas.minutas.length})\n` +
+      `- Planos PDF en Comparador: A=${obraState.planosComparador.A?.nombre || 'ninguno'}, B=${obraState.planosComparador.B?.nombre || 'ninguno'}\n` +
       `- Catálogo de Planos: es SOLO un listado de códigos y títulos (ej. ET-LE-OC-MD-513), NO contiene el texto interno de Memorias Descriptivas ni Estudios de Suelos.\n` +
       `IMPORTANTE: Si el usuario pide buscar dentro de un documento específico (p. ej. una Memoria Descriptiva o Estudio particular) y ese documento NO figura en las listas reales anteriores ni en los extractos de Drive/Pliegos/Adjuntos de abajo, infórmalo con total transparencia al principio de tu respuesta antes de ofrecer cualquier información complementaria o criterio técnico general.`,
   });
@@ -3250,11 +2679,11 @@ async function prepararContenidoConsulta(
   }
 
   // 3. Documentos PDF adjuntados en el Chat IA
-  if (chatAdjuntos.length > 0) {
+  if (obraState.chatAdjuntos.length > 0) {
     const infoAdjuntos: string[] = [];
-    for (const adj of chatAdjuntos) {
-      if (adj.esEscaneado && ai) {
-        const uri = await asegurarGeminiFileUri(adj as unknown as PliegoIndexado, ai);
+    for (const adj of obraState.chatAdjuntos) {
+      if (adj.esEscaneado && obraState.ai) {
+        const uri = await asegurarGeminiFileUri(adj as unknown as PliegoIndexado, obraState.ai);
         if (uri) {
           parts.push({
             fileData: {
@@ -3276,20 +2705,20 @@ async function prepararContenidoConsulta(
   }
 
   // 4. Planos PDF cargados en el comparador
-  if (planosComparador.A || planosComparador.B) {
+  if (obraState.planosComparador.A || obraState.planosComparador.B) {
     const infoPlanos: string[] = [];
-    if (planosComparador.A) {
+    if (obraState.planosComparador.A) {
       infoPlanos.push(
-        `[PLANO A EN COMPARADOR: ${planosComparador.A.nombre} (${planosComparador.A.paginas} págs)]\n` +
-        `Métricas: ${(planosComparador.A.metricasDetectadas || []).join(', ')}\n` +
-        `${(planosComparador.A.contenidoTexto || '').slice(0, 22000)}`
+        `[PLANO A EN COMPARADOR: ${obraState.planosComparador.A.nombre} (${obraState.planosComparador.A.paginas} págs)]\n` +
+        `Métricas: ${(obraState.planosComparador.A.metricasDetectadas || []).join(', ')}\n` +
+        `${(obraState.planosComparador.A.contenidoTexto || '').slice(0, 22000)}`
       );
     }
-    if (planosComparador.B) {
+    if (obraState.planosComparador.B) {
       infoPlanos.push(
-        `[PLANO B EN COMPARADOR: ${planosComparador.B.nombre} (${planosComparador.B.paginas} págs)]\n` +
-        `Métricas: ${(planosComparador.B.metricasDetectadas || []).join(', ')}\n` +
-        `${(planosComparador.B.contenidoTexto || '').slice(0, 22000)}`
+        `[PLANO B EN COMPARADOR: ${obraState.planosComparador.B.nombre} (${obraState.planosComparador.B.paginas} págs)]\n` +
+        `Métricas: ${(obraState.planosComparador.B.metricasDetectadas || []).join(', ')}\n` +
+        `${(obraState.planosComparador.B.contenidoTexto || '').slice(0, 22000)}`
       );
     }
     parts.push({
@@ -3303,22 +2732,22 @@ async function prepararContenidoConsulta(
     parts.push({
       text: `DATOS VIVOS DE LA OBRA (CATÁLOGO DE PLANOS, HITOS CONTRACTUALES, INTERFERENCIAS REALES Y NOTAS DE CAMPO):\n${JSON.stringify(restoContexto)}`,
     });
-  } else if (storeInterferencias.length > 0) {
+  } else if (obraState.storeInterferencias.length > 0) {
     parts.push({
-      text: `INTERFERENCIAS Y CRUCES REALES SINCRONIZADOS (${storeInterferencias.length}):\n${JSON.stringify(storeInterferencias)}`,
+      text: `INTERFERENCIAS Y CRUCES REALES SINCRONIZADOS (${obraState.storeInterferencias.length}):\n${JSON.stringify(obraState.storeInterferencias)}`,
     });
   }
 
   // 6. Minutas, Compromisos y Notas de Pedido de Ingeniería
-  if (storeMinutas.minutas.length > 0 || storeMinutas.compromisos.length > 0 || storeMinutas.notasPedido.length > 0) {
-    const indiceTodasMinutas = storeMinutas.minutas
+  if (obraState.storeMinutas.minutas.length > 0 || obraState.storeMinutas.compromisos.length > 0 || obraState.storeMinutas.notasPedido.length > 0) {
+    const indiceTodasMinutas = obraState.storeMinutas.minutas
       .map(
         m =>
           `• [${m.codigo} | ${m.fechaReunion} | ${m.frente}] ${m.titulo} | Participantes: ${m.participantes || 'N/A'} | Resumen: ${m.resumen || ''}`
       )
       .join('\n');
 
-    const minutasConScore = storeMinutas.minutas.map(m => {
+    const minutasConScore = obraState.storeMinutas.minutas.map(m => {
       const full = `${m.codigo} ${m.titulo} ${m.contenidoTexto || ''}`
         .normalize('NFD')
         .replace(/[\u0300-\u036f]/g, '')
@@ -3347,14 +2776,14 @@ async function prepararContenidoConsulta(
       )
       .join('\n\n');
 
-    const resumenComp = storeMinutas.compromisos
+    const resumenComp = obraState.storeMinutas.compromisos
       .map(
         c =>
           `- [${c.estado}] (${c.minutaCodigo} ${c.minutaFecha}) ${c.numeroItem}: ${c.descripcion} | Resp: ${c.responsable} | Vence: ${c.fechaLimite} | NP: ${(c.notasPedidoIds || []).join(', ') || 'Sin NP'}`
       )
       .join('\n');
 
-    const resumenNotasPed = storeMinutas.notasPedido
+    const resumenNotasPed = obraState.storeMinutas.notasPedido
       .map(
         np =>
           `• [${np.numeroNota} | ${np.fechaEmision}] Emisor: ${np.emisor} ➔ Destinatario: ${np.destinatario} | Asunto: ${np.asunto}\n${(np.contenidoMarkdown || '').slice(0, 3500)}`
@@ -3363,9 +2792,9 @@ async function prepararContenidoConsulta(
 
     parts.push({
       text:
-        `MINUTAS DE REUNIÓN (${storeMinutas.minutas.length} TOTALES):\n${indiceTodasMinutas}\n\n` +
+        `MINUTAS DE REUNIÓN (${obraState.storeMinutas.minutas.length} TOTALES):\n${indiceTodasMinutas}\n\n` +
         `EXTRACTOS DE MINUTAS RELEVANTES:\n${extractosMinutas}\n\n` +
-        `COMPROMISOS (${storeMinutas.compromisos.length} TOTALES):\n${resumenComp}\n\n` +
+        `COMPROMISOS (${obraState.storeMinutas.compromisos.length} TOTALES):\n${resumenComp}\n\n` +
         (resumenNotasPed ? `NOTAS DE PEDIDO GENERADAS:\n${resumenNotasPed}` : ''),
     });
   }
@@ -3404,8 +2833,8 @@ function construirFallbackInteligente(
   contextoObra?: any,
   driveContextoTexto?: string
 ): string {
-  if (chatAdjuntos.length > 0) {
-    return auditarAdjuntoVsPliegoLocal(chatAdjuntos, pliegosIndexados, mensaje);
+  if (obraState.chatAdjuntos.length > 0) {
+    return auditarAdjuntoVsPliegoLocal(obraState.chatAdjuntos, obraState.pliegosIndexados, mensaje);
   }
 
   if (driveContextoTexto && driveContextoTexto.trim()) {
@@ -3413,24 +2842,24 @@ function construirFallbackInteligente(
   }
 
   if (
-    storeNotasLibro.length > 0 &&
+    obraState.storeNotasLibro.length > 0 &&
     /\b(nota|libro|transnoa|contest|respond|orden de servicio|nota de pedido|nota de servicio|discrepanc|actor|np|os|ns)\b/i.test(
       mensaje
     )
   ) {
-    return construirFallbackLocalNotasLibro(mensaje, storeNotasLibro);
+    return construirFallbackLocalNotasLibro(mensaje, obraState.storeNotasLibro);
   }
 
   // Si el usuario pide comparar Planos A/B en el chat
   if (
-    (planosComparador.A || planosComparador.B) &&
+    (obraState.planosComparador.A || obraState.planosComparador.B) &&
     /plano|compar|discrepanc|diferenc/i.test(mensaje) &&
-    planosComparador.A
+    obraState.planosComparador.A
   ) {
     return compararPlanosLocalFallback({
-      planoA: planosComparador.A,
-      planoB: planosComparador.B,
-      pliegos: pliegosIndexados,
+      planoA: obraState.planosComparador.A,
+      planoB: obraState.planosComparador.B,
+      pliegos: obraState.pliegosIndexados,
       enfoque: mensaje,
     });
   }
@@ -3453,15 +2882,15 @@ function construirFallbackInteligente(
     );
   }
 
-  if (pliegosIndexados.length > 0) {
-    return generarCuadroComparativoLocal(mensaje, pliegosIndexados, recuperado);
+  if (obraState.pliegosIndexados.length > 0) {
+    return generarCuadroComparativoLocal(mensaje, obraState.pliegosIndexados, recuperado);
   }
 
-  if (storeNotasLibro.length > 0) {
-    return construirFallbackLocalNotasLibro(mensaje, storeNotasLibro);
+  if (obraState.storeNotasLibro.length > 0) {
+    return construirFallbackLocalNotasLibro(mensaje, obraState.storeNotasLibro);
   }
 
-  const local = buscarYExtraerDePliegosReales(mensaje, pliegosIndexados);
+  const local = buscarYExtraerDePliegosReales(mensaje, obraState.pliegosIndexados);
   return local.resumen;
 }
 
@@ -3504,7 +2933,7 @@ app.post('/api/chat/stream', async (req, res) => {
       return;
     }
 
-    if (pliegosIndexados.length === 0 && Array.isArray(pliegoIds) && pliegoIds.length > 0) {
+    if (obraState.pliegosIndexados.length === 0 && Array.isArray(pliegoIds) && pliegoIds.length > 0) {
       enviarEvento({ needsSync: true, done: true });
       res.end();
       return;
@@ -3567,7 +2996,7 @@ app.post('/api/chat/stream', async (req, res) => {
               done: true,
               fuente: `${orRes.modelUsed}-stream`,
               nuevosDriveLeidos: driveRes.nuevosLeidos,
-              driveDocsTotal: storeDriveDocumentos.length,
+              driveDocsTotal: obraState.storeDriveDocumentos.length,
               precisionMeta: {
                 nivelId: decision.def.nivelId,
                 etiquetaNivel: decision.def.etiquetaNivel,
@@ -3642,7 +3071,7 @@ app.post('/api/chat/stream', async (req, res) => {
               done: true,
               fuente: `${modelUsed}-stream`,
               nuevosDriveLeidos: driveRes.nuevosLeidos,
-              driveDocsTotal: storeDriveDocumentos.length,
+              driveDocsTotal: obraState.storeDriveDocumentos.length,
               precisionMeta: {
                 nivelId: decision.def.nivelId,
                 etiquetaNivel: decision.def.etiquetaNivel,
@@ -3681,7 +3110,7 @@ app.post('/api/chat/stream', async (req, res) => {
       done: true,
       fuente: 'indice-local-rapido',
       nuevosDriveLeidos: driveRes.nuevosLeidos,
-      driveDocsTotal: storeDriveDocumentos.length,
+      driveDocsTotal: obraState.storeDriveDocumentos.length,
     });
     res.end();
   } catch (err: any) {
@@ -3699,7 +3128,7 @@ app.post('/api/pliegos/extraer', async (req, res) => {
       return;
     }
 
-    if (pliegosIndexados.length === 0) {
+    if (obraState.pliegosIndexados.length === 0) {
       res.json({
         exito: true,
         fuente: 'aviso-sin-pliegos',
@@ -3771,7 +3200,7 @@ app.post('/api/chat', async (req, res) => {
       return;
     }
 
-    if (pliegosIndexados.length === 0 && Array.isArray(pliegoIds) && pliegoIds.length > 0) {
+    if (obraState.pliegosIndexados.length === 0 && Array.isArray(pliegoIds) && pliegoIds.length > 0) {
       res.json({ exito: false, needsSync: true });
       return;
     }
@@ -3830,7 +3259,7 @@ app.post('/api/chat', async (req, res) => {
               fuente: orRes.modelUsed,
               respuesta: orRes.texto,
               nuevosDriveLeidos: driveRes.nuevosLeidos,
-              driveDocsTotal: storeDriveDocumentos.length,
+              driveDocsTotal: obraState.storeDriveDocumentos.length,
               precisionMeta: {
                 nivelId: decision.def.nivelId,
                 etiquetaNivel: decision.def.etiquetaNivel,
@@ -3891,7 +3320,7 @@ app.post('/api/chat', async (req, res) => {
               fuente: modelUsed,
               respuesta: response.text,
               nuevosDriveLeidos: driveRes.nuevosLeidos,
-              driveDocsTotal: storeDriveDocumentos.length,
+              driveDocsTotal: obraState.storeDriveDocumentos.length,
               precisionMeta: {
                 nivelId: decision.def.nivelId,
                 etiquetaNivel: decision.def.etiquetaNivel,
@@ -3928,7 +3357,7 @@ app.post('/api/chat', async (req, res) => {
         driveRes.contextoTexto
       )}`,
       nuevosDriveLeidos: driveRes.nuevosLeidos,
-      driveDocsTotal: storeDriveDocumentos.length,
+      driveDocsTotal: obraState.storeDriveDocumentos.length,
     });
   } catch (err: any) {
     res.status(500).json({ exito: false, error: err?.message || 'Error en procesamiento' });

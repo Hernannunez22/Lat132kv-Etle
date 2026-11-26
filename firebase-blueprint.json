@@ -427,6 +427,8 @@
         "fecha": { "type": "string", "maxLength": 64 },
         "dataUrl": { "type": "string", "maxLength": 450000 },
         "analisisIA": { "type": "string", "maxLength": 4000 },
+        "frente": { "type": "string", "maxLength": 120 },
+        "interferenciaId": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -568,18 +570,20 @@
     },
     "WorkspaceIAControl": {
       "title": "WorkspaceIAControl",
-      "description": "Master AI control policy toggling free-only mode vs paid models across the team.",
+      "description": "Master AI control policy toggling free-only mode vs per-user paid models across the team.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128 },
         "modelosPagosHabilitados": { "type": "boolean" },
+        "usuariosPagosAutorizados": { "type": "array" },
+        "limitesPorUsuarioUsd": { "type": "object" },
         "updatedByEmail": { "type": "string", "minLength": 3, "maxLength": 200 },
         "updatedByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "workspaceId", "modelosPagosHabilitados", "updatedByEmail", "updatedByUid", "createdAt", "updatedAt"]
+      "required": ["id", "workspaceId", "modelosPagosHabilitados", "usuariosPagosAutorizados", "updatedByEmail", "updatedByUid", "createdAt", "updatedAt"]
     }
   },
   "firestore": {

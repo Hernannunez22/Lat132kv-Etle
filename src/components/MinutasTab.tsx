@@ -115,7 +115,7 @@ export const MinutasTab: React.FC = () => {
     driveConnectionState,
     conectarGoogleDriveChat,
     desconectarGoogleDrive,
-    modelosPagosHabilitados,
+    puedeUsarModelosPagos,
   } = useApp();
 
   const hoyIso = new Date().toISOString().split('T')[0];
@@ -161,10 +161,10 @@ export const MinutasTab: React.FC = () => {
   const [audioModeloId, setAudioModeloId] = useState<string>('');
   const [audioMotor, setAudioMotor] = useState<'gratuito' | 'gemini'>('gratuito');
   useEffect(() => {
-    if (!modelosPagosHabilitados && audioMotor !== 'gratuito') {
+    if (!puedeUsarModelosPagos && audioMotor !== 'gratuito') {
       setAudioMotor('gratuito');
     }
-  }, [modelosPagosHabilitados, audioMotor]);
+  }, [puedeUsarModelosPagos, audioMotor]);
   const [audioCodigo, setAudioCodigo] = useState('');
   const [audioFecha, setAudioFecha] = useState(hoyIso);
   const [audioFrente, setAudioFrente] = useState(FRENTES_OPCIONES[0]);
@@ -1102,17 +1102,17 @@ export const MinutasTab: React.FC = () => {
                 Motor de redacción de minuta
               </label>
               <select
-                value={modelosPagosHabilitados ? audioMotor : 'gratuito'}
+                value={puedeUsarModelosPagos ? audioMotor : 'gratuito'}
                 onChange={e =>
-                  setAudioMotor(modelosPagosHabilitados && e.target.value === 'gemini' ? 'gemini' : 'gratuito')
+                  setAudioMotor(puedeUsarModelosPagos && e.target.value === 'gemini' ? 'gemini' : 'gratuito')
                 }
-                disabled={procesandoAudio || !modelosPagosHabilitados}
+                disabled={procesandoAudio || !puedeUsarModelosPagos}
                 className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-80"
               >
                 <option value="gratuito">
                   Gratuito $0 · Groq Whisper + OpenRouter (:free)
                 </option>
-                {modelosPagosHabilitados && (
+                {puedeUsarModelosPagos && (
                   <option value="gemini">Groq Whisper + Gemini</option>
                 )}
               </select>

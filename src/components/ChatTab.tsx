@@ -15,6 +15,10 @@ import {
   extraerDriveFolderId,
 } from '../utils/googleAuth';
 import {
+  BOOTSTRAP_ADMIN_EMAIL,
+  type WorkspaceInviteRecord,
+} from '../utils/firestoreSync';
+import {
   Send,
   Trash2,
   Bot,
@@ -43,9 +47,12 @@ import {
   RotateCcw,
   LogOut,
   ShieldCheck,
+  Clock,
+  FilePenLine,
+  Activity,
 } from 'lucide-react';
 
-type FiltroLibro = 'TODAS' | 'TRANSNOA' | 'UTE' | 'SIN_RESPUESTA' | 'CON_DISCREPANCIA';
+type FiltroLibro = 'TODAS' | 'CRITICAS' | 'TRANSNOA' | 'UTE' | 'SIN_RESPUESTA' | 'CON_DISCREPANCIA';
 const ACTORES_LIBRO: ActorNotaLibro[] = [
   'UTE / Contratista',
   'TRANSNOA',
@@ -54,6 +61,24 @@ const ACTORES_LIBRO: ActorNotaLibro[] = [
   'Proyectista',
   'Otro',
 ];
+
+function calcularDiasSinRespuestaNota(n: NotaLibro): number | null {
+  if (n.estadoRespuesta !== 'SIN_RESPUESTA' && n.estadoRespuesta !== 'CON_DISCREPANCIA') {
+    return null;
+  }
+  const f = String(n.fecha || '').trim();
+  let ms: number | null = null;
+  const iso = f.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) {
+    ms = Date.parse(`${iso[1]}-${iso[2]}-${iso[3]}T00:00:00Z`);
+  } else {
+    const lat = f.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+    if (lat) ms = Date.parse(`${lat[3]}-${lat[2]}-${lat[1]}T00:00:00Z`);
+  }
+  if (!ms || !Number.isFinite(ms)) return null;
+  const dias = Math.floor((Date.now() - ms) / (1000 * 60 * 60 * 24));
+  return dias >= 0 ? dias : null;
+}
 const ESTADOS_LIBRO: EstadoRespuestaNota[] = [
   'SIN_RESPUESTA',
   'CONTESTADA',
@@ -82,6 +107,7 @@ export const ChatTab: React.FC = () => {
     driveFolderId,
     setDriveFolderId,
     driveConnectionState,
+    ultimaSyncDrive,
     verificarConexionDriveLive,
     conectarGoogleDriveChat,
     desconectarGoogleDrive,
@@ -100,7 +126,14 @@ export const ChatTab: React.FC = () => {
     geminiPrecisionState,
     esUsuarioMaestro,
     modelosPagosHabilitados,
+    puedeUsarModelosPagos,
+    usuariosPagosAutorizados,
+    limitesPorUsuarioUsd,
     toggleModelosPagosMaestro,
+    actualizarControlMaestroIA,
+    listarInvitacionesNube,
+    cloudRole,
+    cloudSyncStatus,
     guardarConfigPrecision,
     resetearUsoGemini,
   } = useApp();
@@ -120,6 +153,10 @@ export const ChatTab: React.FC = () => {
     popupBloqueado?: boolean;
   } | null>(null);
   const [mostrarPanelLimites, setMostrarPanelLimites] = useState(false);
+  const [mostrarUsuariosPagosMaestro, setMostrarUsuariosPagosMaestro] = useState(false);
+  const [invitacionesMaestro, setInvitacionesMaestro] = useState<WorkspaceInviteRecord[]>([]);
+  const [nuevoEmailPagoMaestro, setNuevoEmailPagoMaestro] = useState('');
+  const [limitesUsuarioDraftChat, setLimitesUsuarioDraftChat] = useState<Record<string, string>>({});
   const [guardandoLimites, setGuardandoLimites] = useState(false);
   const [cambiandoMaster, setCambiandoMaster] = useState(false);
   const [avisoLimites, setAvisoLimites] = useState<string | null>(null);
@@ -163,8 +200,32 @@ export const ChatTab: React.FC = () => {
     setLimitesDraft(next);
   }, [geminiPrecisionState]);
 
+  useEffect(() => {
+    const nextUserLimits: Record<string, string> = {};
+    for (const [k, v] of Object.entries(limitesPorUsuarioUsd || {})) {
+      nextUserLimits[k.toLowerCase().trim()] = String(v);
+    }
+    setLimitesUsuarioDraftChat(nextUserLimits);
+  }, [limitesPorUsuarioUsd]);
+
+  useEffect(() => {
+    if (!esUsuarioMaestro || cloudRole !== 'admin' || cloudSyncStatus !== 'sincronizado') return;
+    if (!mostrarUsuariosPagosMaestro) return;
+    let cancelado = false;
+    void listarInvitacionesNube()
+      .then(lista => {
+        if (!cancelado) setInvitacionesMaestro(lista);
+      })
+      .catch(() => {
+        // Silencioso si falla carga temporal
+      });
+    return () => {
+      cancelado = true;
+    };
+  }, [esUsuarioMaestro, cloudRole, cloudSyncStatus, mostrarUsuariosPagosMaestro, listarInvitacionesNube]);
+
   const handleSeleccionarNivelPrecision = async (nivel: PrecisionNivelId) => {
-    const nivelEfectivo: PrecisionNivelId = modelosPagosHabilitados ? nivel : 'gratuito';
+    const nivelEfectivo: PrecisionNivelId = puedeUsarModelosPagos ? nivel : 'gratuito';
     setPrecisionNivel(nivelEfectivo);
     try {
       await guardarConfigPrecision({ nivelPreferido: nivelEfectivo });
@@ -183,6 +244,93 @@ export const ChatTab: React.FC = () => {
       setAvisoLimites(e?.message || 'No se pudo cambiar el control maestro.');
     } finally {
       setCambiandoMaster(false);
+    }
+  };
+
+  const handleToggleUsuarioPagoChat = async (emailRaw: string) => {
+    const emailNorm = emailRaw.trim().toLowerCase();
+    if (!esUsuarioMaestro || cambiandoMaster || !emailNorm) return;
+    setCambiandoMaster(true);
+    setAvisoLimites(null);
+    try {
+      const yaTiene = usuariosPagosAutorizados.includes(emailNorm);
+      const nextUsers = yaTiene
+        ? usuariosPagosAutorizados.filter(u => u !== emailNorm)
+        : [...usuariosPagosAutorizados, emailNorm];
+      const nextGlobal = yaTiene ? modelosPagosHabilitados : true;
+      await actualizarControlMaestroIA({
+        modelosPagosHabilitados: nextGlobal,
+        usuariosPagosAutorizados: nextUsers,
+      });
+    } catch (e: any) {
+      setAvisoLimites(e?.message || 'No se pudo actualizar permiso del usuario.');
+    } finally {
+      setCambiandoMaster(false);
+    }
+  };
+
+  const handleAgregarEmailPagoChat = async () => {
+    const emailNorm = nuevoEmailPagoMaestro.trim().toLowerCase();
+    if (!esUsuarioMaestro || cambiandoMaster) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+      setAvisoLimites('Ingresa un correo electrónico válido.');
+      return;
+    }
+    if (usuariosPagosAutorizados.includes(emailNorm)) {
+      setNuevoEmailPagoMaestro('');
+      return;
+    }
+    setCambiandoMaster(true);
+    setAvisoLimites(null);
+    try {
+      await actualizarControlMaestroIA({
+        modelosPagosHabilitados: true,
+        usuariosPagosAutorizados: [...usuariosPagosAutorizados, emailNorm],
+      });
+      setNuevoEmailPagoMaestro('');
+    } catch (e: any) {
+      setAvisoLimites(e?.message || 'No se pudo agregar el correo.');
+    } finally {
+      setCambiandoMaster(false);
+    }
+  };
+
+  const handleGuardarTopesUsuarioChat = async () => {
+    if (!esUsuarioMaestro || cambiandoMaster) return;
+    setCambiandoMaster(true);
+    setAvisoLimites(null);
+    try {
+      const nextLimits: Record<string, number> = {};
+      for (const [emailKey, rawVal] of Object.entries(limitesUsuarioDraftChat)) {
+        const clean = emailKey.trim().toLowerCase();
+        const num = Number(rawVal);
+        if (clean.includes('@') && Number.isFinite(num) && num > 0) {
+          nextLimits[clean] = Number(num.toFixed(2));
+        }
+      }
+      await actualizarControlMaestroIA({ limitesPorUsuarioUsd: nextLimits });
+      setAvisoLimites('Topes USD por usuario guardados.');
+      setTimeout(() => setAvisoLimites(null), 2600);
+    } catch (e: any) {
+      setAvisoLimites(e?.message || 'Error guardando topes USD por usuario.');
+    } finally {
+      setCambiandoMaster(false);
+    }
+  };
+
+  const handleFijarModeloOpenRouterSalud = async (modeloId: string) => {
+    if (!modeloId) return;
+    setGuardandoLimites(true);
+    setAvisoLimites(null);
+    try {
+      setOpenRouterModeloDraft(modeloId);
+      await guardarConfigPrecision({ openRouterModeloPreferido: modeloId });
+      setAvisoLimites(`Modelo gratuito fijado: ${modeloId}`);
+      setTimeout(() => setAvisoLimites(null), 2600);
+    } catch (e: any) {
+      setAvisoLimites(e?.message || 'No se pudo fijar el modelo gratuito.');
+    } finally {
+      setGuardandoLimites(false);
     }
   };
 
@@ -528,11 +676,29 @@ export const ChatTab: React.FC = () => {
     const ute = notasLibro.filter(n => n.actorEmisor === 'UTE / Contratista').length;
     const sinRespuesta = notasLibro.filter(n => n.estadoRespuesta === 'SIN_RESPUESTA').length;
     const conDiscrepancia = notasLibro.filter(n => n.estadoRespuesta === 'CON_DISCREPANCIA').length;
-    return { transnoa, ute, sinRespuesta, conDiscrepancia };
+    const criticas = notasLibro.filter(n => {
+      const d = calcularDiasSinRespuestaNota(n);
+      return d !== null && d >= 7;
+    }).length;
+    const pendientesTransnoa = notasLibro.filter(
+      n =>
+        (n.estadoRespuesta === 'SIN_RESPUESTA' || n.estadoRespuesta === 'CON_DISCREPANCIA') &&
+        n.actorReceptor === 'TRANSNOA'
+    ).length;
+    const pendientesUte = notasLibro.filter(
+      n =>
+        (n.estadoRespuesta === 'SIN_RESPUESTA' || n.estadoRespuesta === 'CON_DISCREPANCIA') &&
+        n.actorReceptor === 'UTE / Contratista'
+    ).length;
+    return { transnoa, ute, sinRespuesta, conDiscrepancia, criticas, pendientesTransnoa, pendientesUte };
   }, [notasLibro]);
 
   const notasLibroFiltradas = useMemo(() => {
     return notasLibro.filter(n => {
+      if (filtroLibro === 'CRITICAS') {
+        const d = calcularDiasSinRespuestaNota(n);
+        return d !== null && d >= 7;
+      }
       if (filtroLibro === 'TRANSNOA') {
         return n.actorEmisor === 'TRANSNOA' || n.actorReceptor === 'TRANSNOA';
       }
@@ -548,6 +714,35 @@ export const ChatTab: React.FC = () => {
       return true;
     });
   }, [notasLibro, filtroLibro]);
+
+  // Índice rápido de vínculos cruzados desde Notas de Libro hacia Planos e Interferencias
+  const enlacesCruzadosPorNota = useMemo(() => {
+    const map = new Map<string, { planosMatch: string[]; crucesMatch: string[] }>();
+    for (const n of notasLibroFiltradas.slice(0, 80)) {
+      const corpus = `${n.codigo} ${n.titulo || n.nombreArchivo || ''} ${n.resumen || ''} ${(n.referenciasNotas || []).join(' ')}`.toUpperCase();
+      const planosMatch: string[] = [];
+      for (const p of planos) {
+        const cod = (p.codigo || '').trim().toUpperCase();
+        if (cod.length >= 4 && corpus.includes(cod)) {
+          planosMatch.push(p.codigo);
+          if (planosMatch.length >= 2) break;
+        }
+      }
+      const crucesMatch: string[] = [];
+      for (const c of interferencias) {
+        const emp = (c.empresa || '').trim().toUpperCase();
+        const carp = (c.carpetaNombre || '').trim().toUpperCase();
+        if ((emp.length >= 3 && corpus.includes(emp)) || (carp.length >= 4 && corpus.includes(carp))) {
+          crucesMatch.push(c.empresa);
+          if (crucesMatch.length >= 2) break;
+        }
+      }
+      if (planosMatch.length > 0 || crucesMatch.length > 0) {
+        map.set(n.id, { planosMatch, crucesMatch });
+      }
+    }
+    return map;
+  }, [notasLibroFiltradas, planos, interferencias]);
 
   const badgeActorColor = (actor: string) => {
     if (actor === 'TRANSNOA') return 'bg-violet-500/15 text-violet-300 border-violet-500/30';
@@ -756,6 +951,14 @@ export const ChatTab: React.FC = () => {
                 <span>Conectar Drive</span>
               </button>
             )}
+            {ultimaSyncDrive && (
+              <span
+                className="text-[10px] font-mono px-2 py-1 rounded-lg bg-slate-900/90 border border-slate-800 text-slate-300 whitespace-nowrap shrink-0"
+                title={ultimaSyncDrive.resumen}
+              >
+                Caché Drive: {new Date(ultimaSyncDrive.fechaIso).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+              </span>
+            )}
             <button
               type="button"
               onClick={handleSyncDocsTecnicosDrive}
@@ -948,7 +1151,7 @@ export const ChatTab: React.FC = () => {
               disponiblePorLimite: true,
             },
           ];
-          const modelosVisibles = modelosPagosHabilitados
+          const modelosVisibles = puedeUsarModelosPagos
             ? modelosBase
             : modelosBase.filter(m => m.nivelId === 'gratuito');
 
@@ -963,7 +1166,7 @@ export const ChatTab: React.FC = () => {
                   }
                 >
                   {modelosVisibles.map(item => {
-                    const activo = precisionNivel === item.nivelId || (!modelosPagosHabilitados && item.nivelId === 'gratuito');
+                    const activo = precisionNivel === item.nivelId || (!puedeUsarModelosPagos && item.nivelId === 'gratuito');
                     const sinCupo = !item.disponiblePorLimite;
                     const esGratuito = item.nivelId === 'gratuito';
                     const limQ = item.maxConsultasDiarias > 0 ? String(item.maxConsultasDiarias) : '∞';
@@ -1033,36 +1236,96 @@ export const ChatTab: React.FC = () => {
 
                 <div className="flex flex-wrap items-center justify-between lg:justify-end gap-2 shrink-0">
                   {esUsuarioMaestro && (
-                    <button
-                      type="button"
-                      onClick={() => void handleToggleMasterPagos()}
-                      disabled={cambiandoMaster}
-                      className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-60 ${
-                        modelosPagosHabilitados
-                          ? 'bg-amber-500/20 border-amber-400/60 text-amber-200 hover:bg-amber-500/30'
-                          : 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200 hover:bg-emerald-900/60'
-                      }`}
-                      title="Control Maestro exclusivo: habilita o esconde los modelos pagos para todos los usuarios"
-                    >
-                      {cambiandoMaster ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <ShieldCheck className="w-3.5 h-3.5" />
-                      )}
-                      <span>
-                        {modelosPagosHabilitados
-                          ? 'Maestro: Pagos ON'
-                          : 'Maestro: Solo Gratuito'}
-                      </span>
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleMasterPagos()}
+                        disabled={cambiandoMaster}
+                        className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-60 ${
+                          modelosPagosHabilitados
+                            ? 'bg-amber-500/20 border-amber-400/60 text-amber-200 hover:bg-amber-500/30'
+                            : 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200 hover:bg-emerald-900/60'
+                        }`}
+                        title="Control Maestro exclusivo: activa el modo selectivo o bloquea modelos pagos a todos"
+                      >
+                        {cambiandoMaster ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                        )}
+                        <span>
+                          {modelosPagosHabilitados
+                            ? `Maestro: Pagos (${usuariosPagosAutorizados.length})`
+                            : 'Maestro: Solo Gratuito'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setMostrarUsuariosPagosMaestro(prev => !prev)}
+                        className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap ${
+                          mostrarUsuariosPagosMaestro
+                            ? 'bg-amber-500/25 border-amber-400/70 text-amber-100'
+                            : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-300'
+                        }`}
+                        title="Elegir qué usuarios pueden usar el nivel pago"
+                      >
+                        <Users className="w-3.5 h-3.5 text-amber-300" />
+                        <span>Elegir usuarios ({usuariosPagosAutorizados.length})</span>
+                      </button>
+                    </>
                   )}
 
-                  {modelosPagosHabilitados && (
+                  {puedeUsarModelosPagos && (
                     <div className="text-[10px] font-mono tabular-nums text-slate-300 bg-slate-950/80 border border-slate-800 rounded-lg px-2.5 py-1.5">
-                      Hoy:{' '}
-                      <strong className="text-emerald-300">
-                        ${(geminiPrecisionState?.costoTotalHoyUsd ?? 0).toFixed(4)} USD
-                      </strong>
+                      {geminiPrecisionState?.miLimiteDiarioUsd && geminiPrecisionState.miLimiteDiarioUsd > 0 ? (
+                        <>
+                          Mi tope hoy:{' '}
+                          <strong className="text-emerald-300">
+                            ${(geminiPrecisionState.miConsumoHoyUsd ?? 0).toFixed(4)} / ${geminiPrecisionState.miLimiteDiarioUsd.toFixed(2)}
+                          </strong>
+                        </>
+                      ) : (
+                        <>
+                          Hoy:{' '}
+                          <strong className="text-emerald-300">
+                            ${(geminiPrecisionState?.costoTotalHoyUsd ?? 0).toFixed(4)} USD
+                          </strong>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {geminiPrecisionState?.openRouterSalud && (
+                    <div className="text-[10px] font-mono text-slate-300 bg-slate-950/80 border border-emerald-800/40 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5">
+                      <Activity
+                        className={`w-3 h-3 shrink-0 ${
+                          geminiPrecisionState.openRouterSalud.modelosConAlerta.length > 0
+                            ? 'text-amber-400'
+                            : 'text-emerald-400'
+                        }`}
+                      />
+                      <span className="truncate max-w-[170px]" title={geminiPrecisionState.openRouterSalud.ultimoModeloExitoso || 'openrouter/free'}>
+                        OR :free{' '}
+                        {geminiPrecisionState.openRouterSalud.ultimoModeloExitoso
+                          ? geminiPrecisionState.openRouterSalud.ultimoModeloExitoso.split('/').pop()?.replace(':free', '')
+                          : 'auto'}
+                      </span>
+                      {geminiPrecisionState.openRouterSalud.ultimoModeloExitoso &&
+                        geminiPrecisionState.openRouterSalud.ultimoModeloExitoso !== geminiPrecisionState.openRouterModeloPreferido && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleFijarModeloOpenRouterSalud(
+                                geminiPrecisionState.openRouterSalud!.ultimoModeloExitoso!
+                              )
+                            }
+                            className="px-1.5 py-0.5 rounded bg-emerald-600/30 hover:bg-emerald-500/40 text-emerald-200 border border-emerald-500/40 text-[9px] font-bold cursor-pointer"
+                            title="Fijar último modelo gratuito que respondió OK"
+                          >
+                            Fijar
+                          </button>
+                        )}
                     </div>
                   )}
 
@@ -1077,23 +1340,173 @@ export const ChatTab: React.FC = () => {
                     title="Configurar modelo gratuito y límites diarios"
                   >
                     <SlidersHorizontal className="w-3.5 h-3.5 text-sky-400" />
-                    <span>{modelosPagosHabilitados ? 'Límites y costos' : 'Modelo y límites'}</span>
+                    <span>{puedeUsarModelosPagos ? 'Límites y costos' : 'Modelo y límites'}</span>
                   </button>
                 </div>
               </div>
+
+              {esUsuarioMaestro && mostrarUsuariosPagosMaestro && (
+                <div className="rounded-xl bg-amber-950/20 border border-amber-500/40 p-3 space-y-2.5 text-[11px]">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/20 pb-2">
+                    <div>
+                      <div className="font-bold text-amber-100 flex items-center gap-1.5">
+                        <ShieldCheck className="w-3.5 h-3.5 text-amber-300" />
+                        <span>Usuarios autorizados y tope diario USD individual</span>
+                      </div>
+                      <div className="text-[10px] text-slate-300">
+                        {modelosPagosHabilitados
+                          ? 'Configura acceso pago y tope USD/día por persona (0 = sin tope propio).'
+                          : 'El bloqueo global ($0) está activo: al habilitar un usuario se activará el modo selectivo.'}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleGuardarTopesUsuarioChat()}
+                      disabled={cambiandoMaster}
+                      className="px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-[10px] font-bold cursor-pointer disabled:opacity-50 shrink-0"
+                    >
+                      Guardar topes USD
+                    </button>
+                  </div>
+
+                  {(() => {
+                    const usoUsuariosMap = new Map(
+                      (geminiPrecisionState?.usoPorUsuarioHoy || []).map(u => [
+                        u.email.toLowerCase().trim(),
+                        u,
+                      ])
+                    );
+                    const emailsLista = Array.from(
+                      new Set([
+                        BOOTSTRAP_ADMIN_EMAIL.toLowerCase(),
+                        ...invitacionesMaestro
+                          .map(i => i.invitedEmail.toLowerCase().trim())
+                          .filter(Boolean),
+                        ...usuariosPagosAutorizados
+                          .map(u => u.toLowerCase().trim())
+                          .filter(Boolean),
+                        ...Object.keys(limitesPorUsuarioUsd || {})
+                          .map(u => u.toLowerCase().trim())
+                          .filter(Boolean),
+                        ...Array.from(usoUsuariosMap.keys()),
+                      ])
+                    );
+                    const invMap = new Map(
+                      invitacionesMaestro.map(i => [i.invitedEmail.toLowerCase().trim(), i])
+                    );
+
+                    return (
+                      <div className="space-y-1.5">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5 max-h-48 overflow-y-auto pr-1">
+                          {emailsLista.map(emailItem => {
+                            const tienePago = usuariosPagosAutorizados.includes(emailItem);
+                            const esMaestroItem = emailItem === BOOTSTRAP_ADMIN_EMAIL.toLowerCase();
+                            const inv = invMap.get(emailItem);
+                            const usoHoyUser = usoUsuariosMap.get(emailItem);
+                            const limitVal =
+                              limitesUsuarioDraftChat[emailItem] ??
+                              String(limitesPorUsuarioUsd[emailItem] ?? 0);
+                            const rolTag = esMaestroItem
+                              ? 'Maestro'
+                              : inv
+                                ? inv.status === 'accepted'
+                                  ? 'Conectado'
+                                  : 'Invitado'
+                                : 'Manual';
+
+                            return (
+                              <div
+                                key={emailItem}
+                                className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-950/85 border border-slate-800 px-2.5 py-1.5"
+                              >
+                                <div className="min-w-0 flex-1 space-y-0.5">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-mono text-[10px] text-slate-100 truncate">
+                                      {emailItem}
+                                    </span>
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 shrink-0">
+                                      {rolTag}
+                                    </span>
+                                  </div>
+                                  <div className="text-[9px] font-mono text-slate-400">
+                                    Hoy: {usoHoyUser?.consultas ?? 0} cons. · ${(usoHoyUser?.costoUsd ?? 0).toFixed(4)}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    step={0.1}
+                                    value={limitVal}
+                                    onChange={e =>
+                                      setLimitesUsuarioDraftChat(prev => ({
+                                        ...prev,
+                                        [emailItem]: e.target.value,
+                                      }))
+                                    }
+                                    className="w-14 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-[10px] font-mono text-white"
+                                    title="Tope USD/día (0 = sin tope)"
+                                    aria-label={`Tope USD diario para ${emailItem}`}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleToggleUsuarioPagoChat(emailItem)}
+                                    disabled={cambiandoMaster}
+                                    className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer shrink-0 disabled:opacity-60 ${
+                                      tienePago
+                                        ? 'bg-amber-500/20 text-amber-200 border border-amber-400/60 hover:bg-amber-500/30'
+                                        : 'bg-slate-900 text-slate-300 border border-slate-700 hover:border-emerald-500/50 hover:text-emerald-200'
+                                    }`}
+                                  >
+                                    {tienePago ? 'Nivel Pago: SÍ' : 'Solo Gratis ($0)'}
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                          <input
+                            type="email"
+                            value={nuevoEmailPagoMaestro}
+                            onChange={e => setNuevoEmailPagoMaestro(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                void handleAgregarEmailPagoChat();
+                              }
+                            }}
+                            placeholder="Agregar correo electrónico..."
+                            className="flex-1 min-w-[200px] bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-[11px] font-mono text-white placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handleAgregarEmailPagoChat()}
+                            disabled={cambiandoMaster || !nuevoEmailPagoMaestro.trim()}
+                            className="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[10px] font-bold cursor-pointer disabled:opacity-50"
+                          >
+                            Autorizar correo
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
 
               {mostrarPanelLimites && geminiPrecisionState && (
                 <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-3 space-y-3 text-[11px]">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800/80 pb-2">
                     <div>
                       <div className="font-bold text-slate-100">
-                        {modelosPagosHabilitados
+                        {puedeUsarModelosPagos
                           ? `Control de Límites y Costos por Modelo IA (${geminiPrecisionState.fechaActual})`
                           : `Configuración Motor IA Gratuito (${geminiPrecisionState.fechaActual})`}
                       </div>
                       <div className="text-[10px] text-slate-400">
                         Usa <code className="text-slate-200">0</code> en un límite si deseas dejarlo sin tope.
-                        {modelosPagosHabilitados && (
+                        {puedeUsarModelosPagos && (
                           <>
                             {' '}Acumulado histórico:{' '}
                             <span className="font-mono text-sky-300">
@@ -1103,7 +1516,7 @@ export const ChatTab: React.FC = () => {
                         )}
                       </div>
                     </div>
-                    {modelosPagosHabilitados && (
+                    {puedeUsarModelosPagos && (
                       <div className="flex items-center gap-2 shrink-0 flex-wrap">
                         <select
                           value={politicaDraft}
@@ -1303,8 +1716,11 @@ export const ChatTab: React.FC = () => {
                   <div className="text-xs font-bold text-white">
                     Libro de Comunicaciones / Notas de Libro (Actores y Seguimiento Q&A)
                   </div>
-                  <div className="text-[10px] text-slate-400 font-mono">
-                    {notasLibro.length} total · {statsLibro.transnoa} vinculadas a TRANSNOA · {statsLibro.ute} de UTE · {statsLibro.sinRespuesta} sin respuesta · {statsLibro.conDiscrepancia} con discrepancia
+                  <div className="text-[10px] text-slate-400 font-mono flex flex-wrap items-center gap-x-2">
+                    <span>{notasLibro.length} total · {statsLibro.sinRespuesta} sin resp. ({statsLibro.pendientesTransnoa} a TRANSNOA, {statsLibro.pendientesUte} a UTE) · {statsLibro.conDiscrepancia} con discrepancia</span>
+                    {statsLibro.criticas > 0 && (
+                      <span className="text-rose-300 font-bold">· {statsLibro.criticas} críticas (+7d)</span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1368,26 +1784,32 @@ export const ChatTab: React.FC = () => {
                 />
               </div>
               <div className="flex items-center gap-1 flex-wrap">
-                {(['TODAS', 'TRANSNOA', 'UTE', 'SIN_RESPUESTA', 'CON_DISCREPANCIA'] as FiltroLibro[]).map(f => (
+                {(['TODAS', 'CRITICAS', 'TRANSNOA', 'UTE', 'SIN_RESPUESTA', 'CON_DISCREPANCIA'] as FiltroLibro[]).map(f => (
                   <button
                     key={f}
                     type="button"
                     onClick={() => setFiltroLibro(f)}
                     className={`px-2 py-1 rounded text-[10px] font-semibold border cursor-pointer transition-colors ${
                       filtroLibro === f
-                        ? 'bg-violet-600 text-white border-violet-500'
-                        : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                        ? f === 'CRITICAS'
+                          ? 'bg-rose-600 text-white border-rose-500'
+                          : 'bg-violet-600 text-white border-violet-500'
+                        : f === 'CRITICAS' && statsLibro.criticas > 0
+                          ? 'bg-rose-950/50 text-rose-300 border-rose-700/60 hover:bg-rose-900/50'
+                          : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
                     }`}
                   >
                     {f === 'TODAS'
                       ? 'Todas'
-                      : f === 'TRANSNOA'
-                        ? 'TRANSNOA'
-                        : f === 'UTE'
-                          ? 'UTE / Contr.'
-                          : f === 'SIN_RESPUESTA'
-                            ? 'Sin Respuesta'
-                            : 'Discrepancia'}
+                      : f === 'CRITICAS'
+                        ? `Críticas (+7d) (${statsLibro.criticas})`
+                        : f === 'TRANSNOA'
+                          ? 'TRANSNOA'
+                          : f === 'UTE'
+                            ? 'UTE / Contr.'
+                            : f === 'SIN_RESPUESTA'
+                              ? 'Sin Respuesta'
+                              : 'Discrepancia'}
                   </button>
                 ))}
               </div>
@@ -1450,10 +1872,24 @@ export const ChatTab: React.FC = () => {
               </div>
             ) : (
               <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
-                {notasLibroFiltradas.map(n => (
+                {notasLibroFiltradas.map(n => {
+                  const diasSinResp = calcularDiasSinRespuestaNota(n);
+                  const esCritica = diasSinResp !== null && diasSinResp >= 7;
+                  const esAlerta = diasSinResp !== null && diasSinResp >= 3 && diasSinResp < 7;
+                  const enlaces = enlacesCruzadosPorNota.get(n.id);
+                  const requiereBorrador =
+                    n.estadoRespuesta === 'SIN_RESPUESTA' || n.estadoRespuesta === 'CON_DISCREPANCIA';
+
+                  return (
                   <div
                     key={n.id}
-                    className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 flex flex-col gap-1.5 text-[11px]"
+                    className={`p-2.5 rounded-lg border flex flex-col gap-1.5 text-[11px] ${
+                      esCritica
+                        ? 'bg-rose-950/20 border-rose-500/50'
+                        : esAlerta
+                          ? 'bg-amber-950/15 border-amber-500/40'
+                          : 'bg-slate-900/90 border-slate-800'
+                    }`}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-1.5 min-w-0">
@@ -1463,13 +1899,42 @@ export const ChatTab: React.FC = () => {
                         <span className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold ${badgeEstadoColor(n.estadoRespuesta)}`}>
                           {n.estadoRespuesta.replace(/_/g, ' ')}
                         </span>
+                        {diasSinResp !== null && (
+                          <span
+                            className={`px-1.5 py-0.5 rounded border text-[9px] font-mono font-bold inline-flex items-center gap-1 ${
+                              esCritica
+                                ? 'bg-rose-500/20 border-rose-500/50 text-rose-200'
+                                : esAlerta
+                                  ? 'bg-amber-500/20 border-amber-500/50 text-amber-200'
+                                  : 'bg-slate-800 border-slate-700 text-slate-300'
+                            }`}
+                          >
+                            <Clock className="w-2.5 h-2.5" />
+                            <span>{diasSinResp}d</span>
+                          </span>
+                        )}
                         {n.manualOverride && (
                           <span className="px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/30 text-[9px] text-sky-300 font-semibold">
                             Editado
                           </span>
                         )}
                       </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                        {requiereBorrador && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleSend(
+                                `Redacta un borrador formal de Nota de Pedido / Orden de Servicio de seguimiento vinculada a la nota ${n.codigo} (${n.actorEmisor} ➔ ${n.actorReceptor}, fecha ${n.fecha || 's/d'}${diasSinResp !== null ? `, ${diasSinResp} días pendiente` : ''}). Incluye Asunto, Antecedentes concretos, Puntos pendientes o discrepancias a subsanar ("${n.resumen.slice(0, 220)}"), Respaldo del Pliego contractual aplicable y Plazo perentorio de respuesta en 48/72 horas.`
+                              )
+                            }
+                            className="px-2 py-0.5 rounded bg-amber-600/25 hover:bg-amber-500/35 text-amber-200 border border-amber-500/40 text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                            title="Generar borrador formal de Nota de Pedido / Orden de Servicio con IA"
+                          >
+                            <FilePenLine className="w-3 h-3" />
+                            <span>Redactar NP/OS</span>
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() =>
@@ -1613,8 +2078,35 @@ export const ChatTab: React.FC = () => {
                     </div>
 
                     <p className="text-slate-300 leading-snug line-clamp-2">{n.resumen}</p>
+                    {enlaces && (enlaces.planosMatch.length > 0 || enlaces.crucesMatch.length > 0) && (
+                      <div className="flex flex-wrap items-center gap-1 pt-1">
+                        {enlaces.planosMatch.map(codPlano => (
+                          <button
+                            key={codPlano}
+                            type="button"
+                            onClick={() => setActiveTab('planos')}
+                            className="px-1.5 py-0.5 rounded bg-sky-950/60 hover:bg-sky-900/70 border border-sky-500/30 text-[9px] font-mono text-sky-300 cursor-pointer"
+                            title="Ir al Catálogo de Planos"
+                          >
+                            Plano: {codPlano}
+                          </button>
+                        ))}
+                        {enlaces.crucesMatch.map(emp => (
+                          <button
+                            key={emp}
+                            type="button"
+                            onClick={() => setActiveTab('interferencias')}
+                            className="px-1.5 py-0.5 rounded bg-amber-950/60 hover:bg-amber-900/70 border border-amber-500/30 text-[9px] font-mono text-amber-300 cursor-pointer"
+                            title="Ir a Cruces e Interferencias"
+                          >
+                            Cruce: {emp}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

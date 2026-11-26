@@ -345,6 +345,7 @@ export async function syncWorkspaceSettingsFields(
     notasCampo?: string;
     ultimoInforme?: string;
     megabytesR2?: string;
+    defaultDriveFolderId?: string;
   }
 ) {
   const wsPath = `workspaces/${session.workspaceId}`;
@@ -366,6 +367,9 @@ export async function syncWorkspaceSettingsFields(
   }
   if (fields.megabytesR2 !== undefined) {
     payload.megabytesR2 = clampStr(fields.megabytesR2, 40);
+  }
+  if (fields.defaultDriveFolderId !== undefined) {
+    payload.defaultDriveFolderId = clampStr(fields.defaultDriveFolderId, 200);
   }
 
   try {
@@ -797,6 +801,8 @@ export async function syncFotoCampoToFirestore(session: WorkspaceSessionInfo, f:
       fecha: clampStr(f.fecha || '', 64),
       dataUrl: f.dataUrl,
       analisisIA: clampStr(f.analisisIA || '', 4000),
+      frente: clampStr(f.frente || '', 120),
+      interferenciaId: clampStr(f.interferenciaId || '', 128),
     },
   });
 }
@@ -946,6 +952,7 @@ export interface WorkspaceSyncCallbacks {
     notasCampo: string;
     ultimoInforme: string;
     megabytesR2: string;
+    defaultDriveFolderId: string;
     memberUids: string[];
   }) => void;
   onHitos: (items: Hito[]) => void;
@@ -1015,6 +1022,7 @@ export function subscribeWorkspaceRealtime(
           notasCampo: typeof d.notasCampo === 'string' ? d.notasCampo : '',
           ultimoInforme: typeof d.ultimoInforme === 'string' ? d.ultimoInforme : '',
           megabytesR2: typeof d.megabytesR2 === 'string' ? d.megabytesR2 : '0 MB',
+          defaultDriveFolderId: typeof d.defaultDriveFolderId === 'string' ? d.defaultDriveFolderId : '',
           memberUids: Array.isArray(d.memberUids) ? d.memberUids : [uid],
         });
       },
@@ -1189,6 +1197,8 @@ export function subscribeWorkspaceRealtime(
       fecha: d.fecha || '',
       dataUrl: d.dataUrl || '',
       analisisIA: d.analisisIA || '',
+      frente: d.frente || '',
+      interferenciaId: d.interferenciaId || '',
     }));
     callbacks.onFotosCampo(fotos);
   });
@@ -1268,9 +1278,47 @@ export function subscribeWorkspaceRealtime(
   };
 }
 
+export interface WorkspaceIAControlState {
+  modelosPagosHabilitados: boolean;
+  usuariosPagosAutorizados: string[];
+  limitesPorUsuarioUsd?: Record<string, number>;
+}
+
+function normalizeAuthorizedEmailsList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const clean = item.trim().toLowerCase();
+    if (!clean || clean.length < 3 || clean.length > 200 || !clean.includes('@') || !clean.includes('.')) {
+      continue;
+    }
+    seen.add(clean);
+    if (seen.size >= 50) break;
+  }
+  return Array.from(seen).sort();
+}
+
+function normalizeUserUsdLimitsMap(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const clean = k.trim().toLowerCase();
+    if (!clean || clean.length < 3 || clean.length > 200 || !clean.includes('@') || !clean.includes('.')) {
+      continue;
+    }
+    const num = Number(v);
+    if (Number.isFinite(num) && num >= 0) {
+      out[clean] = Math.min(1000, Number(num.toFixed(4)));
+    }
+    if (Object.keys(out).length >= 50) break;
+  }
+  return out;
+}
+
 export function subscribeWorkspaceIAControl(
   workspaceId: string,
-  onChange: (modelosPagosHabilitados: boolean | null) => void
+  onChange: (state: WorkspaceIAControlState | null) => void
 ): () => void {
   const safeWsId = sanitizeFirestoreId(workspaceId, 'ws');
   const controlRef = doc(db, 'workspaces', safeWsId, 'config', 'ia_control');
@@ -1282,7 +1330,11 @@ export function subscribeWorkspaceIAControl(
         return;
       }
       const data = snap.data();
-      onChange(Boolean(data?.modelosPagosHabilitados));
+      onChange({
+        modelosPagosHabilitados: Boolean(data?.modelosPagosHabilitados),
+        usuariosPagosAutorizados: normalizeAuthorizedEmailsList(data?.usuariosPagosAutorizados),
+        limitesPorUsuarioUsd: normalizeUserUsdLimitsMap(data?.limitesPorUsuarioUsd),
+      });
     },
     error => {
       console.warn(
@@ -1296,11 +1348,13 @@ export function subscribeWorkspaceIAControl(
 
 export async function setWorkspaceIAControl(
   session: WorkspaceSessionInfo,
-  modelosPagosHabilitados: boolean
+  state: WorkspaceIAControlState
 ): Promise<void> {
   const safeWsId = sanitizeFirestoreId(session.workspaceId, 'ws');
   const controlPath = `workspaces/${safeWsId}/config/ia_control`;
   const controlRef = doc(db, 'workspaces', safeWsId, 'config', 'ia_control');
+  const cleanUsers = normalizeAuthorizedEmailsList(state.usuariosPagosAutorizados);
+  const cleanLimits = normalizeUserUsdLimitsMap(state.limitesPorUsuarioUsd);
 
   try {
     const snap = await getDoc(controlRef);
@@ -1310,7 +1364,9 @@ export async function setWorkspaceIAControl(
       await setDoc(controlRef, {
         id: 'ia_control',
         workspaceId: safeWsId,
-        modelosPagosHabilitados: Boolean(modelosPagosHabilitados),
+        modelosPagosHabilitados: Boolean(state.modelosPagosHabilitados),
+        usuariosPagosAutorizados: cleanUsers,
+        limitesPorUsuarioUsd: cleanLimits,
         updatedByEmail,
         updatedByUid,
         createdAt: serverTimestamp(),
@@ -1318,7 +1374,9 @@ export async function setWorkspaceIAControl(
       });
     } else {
       await updateDoc(controlRef, {
-        modelosPagosHabilitados: Boolean(modelosPagosHabilitados),
+        modelosPagosHabilitados: Boolean(state.modelosPagosHabilitados),
+        usuariosPagosAutorizados: cleanUsers,
+        limitesPorUsuarioUsd: cleanLimits,
         updatedByEmail,
         updatedByUid,
         updatedAt: serverTimestamp(),
