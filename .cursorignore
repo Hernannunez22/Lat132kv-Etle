@@ -1,0 +1,9 @@
+# Carpetas de Google Apps Script heredadas / independientes del servidor Node + React
+apps-script/
+scripts/
+
+# Dependencias, builds y temporales
+node_modules/
+dist/
+.playwright-cli/
+*.log
